@@ -94,36 +94,20 @@ router.post("/customer/verify-otp", async (req, res) => {
     phone,
     password,
     isVerified: true,
-    isActive: false
+    isActive: true
   });
 
   await OTP.deleteOne({ _id: record._id });
 
-  try {
-    const to = process.env.MAIL_TO || process.env.ADMIN_EMAIL || process.env.COMPANY_EMAIL || process.env.MAIL_FROM;
-    if (to) {
-      await sendEmail({
-        to,
-        subject: `New customer application - ${process.env.COMPANY_NAME || "Click2Kart"}`,
-        html: `
-          <div style="font-family: ui-sans-serif, system-ui; max-width: 560px; margin: auto; padding: 24px; border: 1px solid #eee; border-radius: 12px;">
-            <h2 style="color:#111827;margin:0 0 12px;font-weight:800">New Customer Verified OTP</h2>
-            <p style="color:#374151;line-height:1.6">A new user has completed verification and is awaiting approval.</p>
-            <ul style="color:#111827;line-height:1.8;padding-left:18px">
-              <li><b>Name:</b> ${customer.name}</li>
-              <li><b>Email:</b> ${customer.email || "-"}</li>
-              <li><b>Phone:</b> ${customer.phone}</li>
-            </ul>
-          </div>
-        `
-      });
-    }
-  } catch {}
+  const token = jwt.sign(
+    { id: customer._id.toString(), role: "customer", email: customer.email },
+    process.env.JWT_SECRET,
+    { expiresIn: "60m" }
+  );
 
-  // Do not auto-login; require admin approval before login
   res.json({
-    message: "application_submitted",
-    pendingApproval: true
+    token,
+    user: { id: customer._id.toString(), name: customer.name, email: customer.email, role: "customer", isKycComplete: !!customer.isKycComplete }
   });
 });
 
