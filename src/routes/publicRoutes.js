@@ -1,6 +1,7 @@
 import express from "express";
 import jwt from "jsonwebtoken";
 import Category from "../models/Category.js";
+import Store from "../models/Store.js";
 import Coupon from "../models/Coupon.js";
 import Bill from "../models/Bill.js";
 import PartnerPayout from "../models/PartnerPayout.js";
@@ -86,6 +87,13 @@ async function computeSummaryForPartner(partner) {
 router.get("/categories", async (req, res) => {
   const items = await getOrSetCache("categories:all", async () => {
     return await Category.find({ isActive: true }).sort({ name: 1 }).select({ name: 1, description: 1 });
+  }, 86400); // 24 hours
+  res.json(items);
+});
+
+router.get("/stores", async (req, res) => {
+  const items = await getOrSetCache("stores:all", async () => {
+    return await Store.find({ isActive: true }).sort({ name: 1 });
   }, 86400); // 24 hours
   res.json(items);
 });

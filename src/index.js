@@ -32,12 +32,22 @@ import paymentRoutes from "./routes/paymentRoutes.js";
 import offerRoutes from "./routes/offerRoutes.js";
 import brandRoutes from "./routes/brandRoutes.js";
 import subCategoryRoutes from "./routes/subCategoryRoutes.js";
+import wishlistRoutes from "./routes/wishlistRoutes.js";
 
 dotenv.config();
 
 const app = express();
 
-app.use(cors());
+app.use(cors({
+  origin: [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://smartodisha.in",
+    "https://www.smartodisha.in"
+  ],
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+}));
 app.use(express.json());
 app.use(morgan("dev"));
 
@@ -69,6 +79,7 @@ app.use("/api/payment", paymentRoutes);
 app.use("/api/offers", offerRoutes);
 app.use("/api/brands", brandRoutes);
 app.use("/api/subcategories", subCategoryRoutes);
+app.use("/api/wishlist", wishlistRoutes);
 
 const PORT = process.env.PORT || 5000;
 
