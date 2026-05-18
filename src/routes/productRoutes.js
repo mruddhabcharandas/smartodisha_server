@@ -55,21 +55,6 @@ const withDerived = (p) => {
 
 const sanitizeProduct = (p, canViewPrice) => {
   let obj = withDerived(p);
-  if (canViewPrice) return obj;
-  delete obj.price;
-  delete obj.gst;
-  delete obj.mrp;
-  delete obj.discountPercent;
-  delete obj.priceTrend;
-  delete obj.bulkDiscountQuantity;
-  delete obj.bulkDiscountPriceReduction;
-  delete obj.bulkTiers;
-  if (Array.isArray(obj.variants)) {
-    obj.variants = obj.variants.map(v => {
-      const { price, mrp, ...rest } = v;
-      return rest;
-    });
-  }
   return obj;
 };
 
