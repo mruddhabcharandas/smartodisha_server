@@ -1,3 +1,4 @@
+
 import express from "express";
 import mongoose from "mongoose";
 import Order from "../models/Order.js";
@@ -12,148 +13,11 @@ import { createBillFromData } from "../lib/billing.js";
 import { sendEmail, renderMail } from "../lib/mailer.js";
 import AuditLog from "../models/AuditLog.js";
 import { notifyAdmin } from "../lib/socket.js";
-import fetch from "node-fetch";
-import axios from "axios";
+import shiprocket from "../lib/shiprocket.js";
 
 const router = express.Router();
 
 const _sanitize = (s) => String(s || "").trim().replace(/^['"`]+|['"`]+$/g, "").replace(/\/+$/, "");
-
-// Shiprocket helper functions
-const getShiprocketToken = async () => {
-  try {
-    const response = await axios.post("https://apiv2.shiprocket.in/v1/external/auth/login", {
-      email: process.env.SHIPROCKET_EMAIL,
-      password: process.env.SHIPROCKET_PASSWORD
-    });
-    return response.data.token;
-  } catch (err) {
-    console.error("Failed to get Shiprocket token:", err.response?.data || err.message);
-    throw err;
-  }
-};
-
-const tryCreateShiprocketShipment = async (order) => {
-  try {
-    if (!process.env.SHIPROCKET_EMAIL || !process.env.SHIPROCKET_PASSWORD || !process.env.SHIPROCKET_PICKUP_PINCODE || !process.env.SHIPROCKET_PICKUP_ADDRESS || !process.env.SHIPROCKET_PICKUP_CITY || !process.env.SHIPROCKET_PICKUP_STATE || !process.env.SHIPROCKET_PICKUP_PHONE || !process.env.SHIPROCKET_PICKUP_NAME) {
-      throw new Error("Shiprocket not configured");
-    }
-    const token = await getShiprocketToken();
-
-    // Address extraction
-    let addr = order.shippingAddress || {};
-    if (!addr.pincode || !addr.line1) {
-      const cust = await Customer.findOne({ phone: order.customer.phone });
-      if (cust && cust.kyc) {
-        addr = {
-          line1: cust.kyc.addressLine1 || cust.address || "",
-          line2: cust.kyc.addressLine2 || "",
-          city: cust.kyc.city || "",
-          state: cust.kyc.state || "",
-          pincode: cust.kyc.pincode || ""
-        };
-      }
-    }
-
-    if (!addr.pincode) throw new Error("Customer pincode is missing");
-    if (!addr.line1) throw new Error("Customer address is missing");
-
-    // Payment mode: CASHFREE and MANUAL are Prepaid, COD_20 is COD
-    const isPrepaid = order.paymentMethod === "CASHFREE" || order.paymentMethod === "MANUAL";
-    const paymentType = isPrepaid ? "Prepaid" : "COD";
-    const codAmount = paymentType === "COD" ? Math.round(order.codDueAmount || 0) : 0;
-
-    // Fetch products
-    const productIds = (order.items || []).map(it => it.product);
-    const products = await Product.find({ _id: { $in: productIds } });
-
-    let totalWeightGrams = 0;
-    let totalQuantity = 0;
-    const orderItems = (order.items || []).map(it => {
-      const p = products.find(prod => prod._id.toString() === it.product.toString());
-      if (p && p.weight) {
-        totalWeightGrams += (p.weight * it.quantity);
-      }
-      totalQuantity += it.quantity;
-      return {
-        name: it.name,
-        sku: it.variantSku || p?.sku || it.product.toString(),
-        units: it.quantity,
-        selling_price: it.price,
-        discount: 0,
-        tax: it.gst,
-        hsn: p?.hsn || "9999"
-      };
-    });
-
-    const weightKg = totalWeightGrams > 0 ? (totalWeightGrams / 1000) : 0.5;
-
-    const cleanPhone = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
-
-    const shipment = {
-      order_id: order._id.toString(),
-      order_date: new Date().toISOString().split('T')[0],
-      pickup_location: process.env.SHIPROCKET_PICKUP_NAME,
-      billing_customer_name: order.customer.name,
-      billing_last_name: "",
-      billing_address: addr.line1,
-      billing_address_2: addr.line2,
-      billing_city: addr.city,
-      billing_pincode: addr.pincode,
-      billing_state: addr.state,
-      billing_country: "India",
-      billing_email: order.customer.email || "customer@example.com",
-      billing_phone: cleanPhone,
-      shipping_is_billing: true,
-      order_items: orderItems,
-      payment_method: paymentType,
-      shipping_charges: 0,
-      giftwrap_charges: 0,
-      transaction_charges: 0,
-      total_discount: order.couponDiscount,
-      sub_total: order.totalEstimate,
-      length: 10,
-      breadth: 10,
-      height: 10,
-      weight: weightKg
-    };
-
-    if (paymentType === "COD") {
-      shipment.cod_amount = codAmount;
-    }
-
-    const { data } = await axios.post("https://apiv2.shiprocket.in/v1/external/orders/create/adhoc", shipment, {
-      headers: { "Authorization": `Bearer ${token}` }
-    });
-
-    console.log("Shiprocket order created:", data);
-    const shipmentId = data.shipment_id;
-    const awb = data.awb_code;
-    const trackingUrl = `https://shiprocket.co/tracking/${awb}`;
-
-    if (awb) {
-      order.shipping = {
-        provider: "SHIPROCKET",
-        waybill: awb,
-        status: data.status || "CREATED",
-        trackingUrl: trackingUrl
-      };
-      order.shiprocketOrderId = data.order_id;
-      order.shiprocketShipmentId = shipmentId;
-      order.shiprocketAwbNumber = awb;
-      order.shipment_status = data.status;
-      order.shippingAddress = addr;
-      order.status = "SHIPPED";
-      await order.save();
-      return order;
-    }
-
-    return null;
-  } catch (err) {
-    console.error("Shiprocket Shipment Exception:", err.response?.data || err.message || err);
-    throw err;
-  }
-};
 
 const validateAndApplyCoupon = async (code, amount) => {
   if (!code) return { discount: 0, finalAmount: amount };
@@ -173,20 +37,111 @@ const validateAndApplyCoupon = async (code, amount) => {
   return { discount, finalAmount: Number((amount - discount).toFixed(2)), couponId: c._id };
 };
 
+const tryCreateShiprocketShipment = async (order) => {
+  try {
+    if (!process.env.SHIPROCKET_EMAIL || !process.env.SHIPROCKET_PASSWORD || !process.env.SHIPROCKET_PICKUP_PINCODE) {
+      throw new Error("Shiprocket not configured");
+    }
+    let addr = order.shippingAddress || {};
+    if (!addr.pincode || !addr.line1) {
+      const cust = await Customer.findOne({ phone: order.customer.phone });
+      if (cust && cust.kyc) {
+        addr = {
+          line1: cust.kyc.addressLine1 || cust.address || "",
+          line2: cust.kyc.addressLine2 || "",
+          city: cust.kyc.city || "",
+          state: cust.kyc.state || "",
+          pincode: cust.kyc.pincode || ""
+        };
+      }
+    }
+
+    if (!addr.pincode) throw new Error("Customer pincode is missing");
+    if (!addr.line1) throw new Error("Customer address is missing");
+
+    const productIds = (order.items || []).map(it => it.product);
+    const products = await Product.find({ _id: { $in: productIds } });
+
+    let totalWeightGrams = 0;
+    const orderItems = (order.items || []).map(it => {
+      const p = products.find(prod => prod._id.toString() === it.product.toString());
+      if (p && p.weight) {
+        totalWeightGrams += (p.weight * it.quantity);
+      }
+      return {
+        name: it.name,
+        sku: it.variantSku || p?.sku || it.product.toString(),
+        units: it.quantity,
+        selling_price: it.price,
+        discount: 0,
+        tax: it.gst,
+        hsn: p?.hsn || "9999"
+      };
+    });
+
+    const weightKg = totalWeightGrams > 0 ? (totalWeightGrams / 1000) : 0.5;
+    const cleanPhone = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
+
+    const shipment = {
+      order_id: order._id.toString(),
+      order_date: new Date().toISOString().split('T')[0],
+      pickup_location: process.env.SHIPROCKET_PICKUP_NAME || "Warehouse",
+      billing_customer_name: order.customer.name,
+      billing_last_name: "",
+      billing_address: addr.line1,
+      billing_address_2: addr.line2,
+      billing_city: addr.city,
+      billing_pincode: addr.pincode,
+      billing_state: addr.state,
+      billing_country: "India",
+      billing_email: order.customer.email || "customer@example.com",
+      billing_phone: cleanPhone,
+      shipping_is_billing: true,
+      order_items: orderItems,
+      payment_method: "Prepaid",
+      shipping_charges: 0,
+      giftwrap_charges: 0,
+      transaction_charges: 0,
+      total_discount: order.couponDiscount,
+      sub_total: order.totalEstimate,
+      length: 10,
+      breadth: 10,
+      height: 10,
+      weight: weightKg
+    };
+
+    const { data } = await shiprocket.post("/orders/create/adhoc", shipment);
+
+    console.log("Shiprocket order created:", data);
+    const shipmentId = data.shipment_id;
+    const awb = data.awb_code;
+    const trackingUrl = `https://shiprocket.co/tracking/${awb}`;
+
+    if (awb) {
+      order.shipping = { provider: "SHIPROCKET", waybill: awb, status: data.status || "CREATED", trackingUrl };
+      order.shiprocketOrderId = data.order_id;
+      order.shiprocketShipmentId = shipmentId;
+      order.shiprocketAwbNumber = awb;
+      order.shipment_status = data.status;
+      order.shippingAddress = addr;
+      order.status = "SHIPPED";
+      await order.save();
+      return order;
+    }
+
+    return null;
+  } catch (err) {
+    console.error("Shiprocket Shipment Exception:", err.response?.data || err.message || err);
+    throw err;
+  }
+};
+
 // Create new order
 router.post("/", auth, requireRole("customer"), async (req, res) => {
-  const {
-    items,
-    notes,
-    paymentMethod,
-    couponCode,
-    cashfreeOrderId,
-    cashfreePaymentId,
-    cashfreeSignature
-  } = req.body || {};
+  const { items, notes, paymentMethod, couponCode, cashfreeOrderId, cashfreePaymentId, cashfreeSignature } = req.body || {};
 
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "no_items" });
-  if (!["CASH", "CASHFREE", "COD_20", "MANUAL"].includes(paymentMethod)) return res.status(400).json({ error: "invalid_payment_method" });
+  if (paymentMethod !== "CASHFREE") return res.status(400).json({ error: "invalid_payment_method" });
 
   const cust = await Customer.findById(req.user.id).select("name phone email kyc address");
   if (!cust) return res.status(404).json({ error: "customer_not_found" });
@@ -195,7 +150,6 @@ router.post("/", auth, requireRole("customer"), async (req, res) => {
   const products = await Product.find({ _id: { $in: ids }, isActive: true });
   if (products.length !== ids.length) return res.status(400).json({ error: "product_not_found" });
 
-  // Check stock before proceeding
   for (const it of items) {
     const p = products.find(x => x._id.toString() === it.productId);
     if (!p) return res.status(400).json({ error: "product_not_found" });
@@ -237,28 +191,23 @@ router.post("/", auth, requireRole("customer"), async (req, res) => {
   });
 
   let cashfreeOrder = null;
-  if (paymentMethod === "CASHFREE" || paymentMethod === "COD_20") {
-    try {
-      const amount = paymentMethod === "COD_20" ? payableTotal * 0.2 : payableTotal;
-      const { data } = await cashfree.post("/pg/orders", {
-        order_id: `order_${Date.now()}`,
-        order_amount: amount,
-        order_currency: "INR",
-        customer_details: {
-          customer_id: `customer_${cust._id.toString()}`,
-          customer_name: cust.name,
-          customer_email: cust.email || "customer@example.com",
-          customer_phone: cust.phone
-        }
-      });
-      cashfreeOrder = data;
-    } catch (err) {
-      console.error("Cashfree Order Creation Failed:", err.response?.data || err.message);
-      return res.status(500).json({ error: "payment_initiation_failed" });
-    }
+  try {
+    const { data } = await cashfree.post("/pg/orders", {
+      order_id: `order_${Date.now()}`,
+      order_amount: payableTotal,
+      order_currency: "INR",
+      customer_details: {
+        customer_id: `customer_${cust._id.toString()}`,
+        customer_name: cust.name,
+        customer_email: cust.email || "customer@example.com",
+        customer_phone: cust.phone
+      }
+    });
+    cashfreeOrder = data;
+  } catch (err) {
+    console.error("Cashfree Order Creation Failed:", err.response?.data || err.message);
+    return res.status(500).json({ error: "payment_initiation_failed" });
   }
-
-  const orderStatus = paymentMethod === "CASH" ? "PENDING_CASH_APPROVAL" : "PENDING_PAYMENT";
 
   const doc = await Order.create({
     customer: { name: cust.name, phone: cust.phone, email: cust.email || "" },
@@ -273,39 +222,33 @@ router.post("/", auth, requireRole("customer"), async (req, res) => {
     totalEstimate: payableTotal,
     couponCode: couponCode?.toUpperCase() || "",
     couponDiscount: coupDiscount,
-    status: orderStatus,
-    paymentMethod,
+    status: "PENDING_PAYMENT",
+    paymentMethod: "CASHFREE",
     paymentStatus: "PENDING",
     cashfreeOrderId: cashfreeOrder?.order_id || cashfreeOrderId || "",
     cashfreePaymentId: cashfreePaymentId || "",
     cashfreeSignature: cashfreeSignature || "",
-    notes: notes || "",
-    codAdvancePercent: paymentMethod === "COD_20" ? 20 : 0,
-    codDueAmount: paymentMethod === "COD_20" ? Number((payableTotal * 0.8).toFixed(2)) : 0
+    notes: notes || ""
   });
 
   if (couponId) {
     await Coupon.findByIdAndUpdate(couponId, { $inc: { usedCount: 1 } });
   }
 
-  // --- STOCK MANAGEMENT ---
   for (const it of items) {
     const qty = Number(it.quantity || 0);
     if (it.variantSku) {
-      // Variant stock update
       await Product.updateOne(
         { _id: it.productId, "variants.sku": String(it.variantSku) },
         { $inc: { "variants.$.stock": -qty } }
       );
     } else {
-      // Regular product stock update
       await Product.updateOne(
         { _id: it.productId },
         { $inc: { stock: -qty } }
       );
     }
   }
-  // Sync total product stock (sum of variants)
   for (const id of ids) {
     const p = await Product.findById(id);
     if (p && p.variants && p.variants.length > 0) {
@@ -314,45 +257,19 @@ router.post("/", auth, requireRole("customer"), async (req, res) => {
       await p.save();
     }
   }
-  // ------------------------
-
-  if (paymentMethod === "CASH") {
-    notifyAdmin("new_offline_order", doc);
-    try {
-      const to = cust.email || process.env.MAIL_TO || process.env.COMPANY_EMAIL || process.env.MAIL_FROM;
-      const html = renderMail({
-        heading: "Order Received",
-        subheading: "Thanks for your order. We’ve started processing it.",
-        highlight: `Order ID: ${doc._id}`,
-        blocks: [
-          { label: "Total", value: `₹${Number(totals.total).toLocaleString("en-IN")}` },
-          { label: "Payment Method", value: doc.paymentMethod },
-          { label: "Status", value: orderStatus }
-        ],
-        items: doc.items.map(it => ({
-          name: it.name,
-          quantity: it.quantity,
-          price: it.price,
-          lineTotal: it.lineTotal
-        })),
-        totals: { subtotal: totals.subtotal, gstTotal: totals.gstTotal, total: totals.total }
-      });
-      if (to) await sendEmail({ to, subject: `Order placed - ${process.env.COMPANY_NAME || "Click2Kart"}`, html });
-    } catch {}
-  }
 
   res.status(201).json({
     order: doc,
-    cashfreeOrderId: cashfreeOrder?.order_id || cashfreeOrderId,
+    cashfreeOrderId: cashfreeOrder?.order_id,
     paymentSessionId: cashfreeOrder?.payment_session_id
   });
 });
 
-// Prepare Payment (no Order creation) - new flow
+// Prepare Payment - new flow
 router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) => {
   const { items, paymentMethod, couponCode } = req.body || {};
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "no_items" });
-  if (!["CASHFREE", "COD_20"].includes(paymentMethod)) return res.status(400).json({ error: "invalid_payment_method" });
+  if (paymentMethod !== "CASHFREE") return res.status(400).json({ error: "invalid_payment_method" });
   try {
     if (!process.env.CASHFREE_APP_ID || !process.env.CASHFREE_SECRET_KEY) {
       return res.status(500).json({ error: "cashfree_not_configured" });
@@ -366,10 +283,9 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
 
     const { finalAmount: payableTotal } = await validateAndApplyCoupon(couponCode, totals.total);
 
-    const amount = paymentMethod === "COD_20" ? payableTotal * 0.2 : payableTotal;
     const { data } = await cashfree.post("/pg/orders", {
       order_id: `prepay_${Date.now()}`,
-      order_amount: amount,
+      order_amount: payableTotal,
       order_currency: "INR",
       customer_details: {
         customer_id: `customer_${req.user.id}`,
@@ -378,8 +294,8 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
         customer_phone: "9999999999"
       }
     });
-    const checksum = crypto.createHash("sha256").update(JSON.stringify({ items, paymentMethod, amount })).digest("hex");
-    return res.json({ cashfreeOrderId: data.order_id, paymentSessionId: data.payment_session_id, amount, checksum });
+    const checksum = crypto.createHash("sha256").update(JSON.stringify({ items, paymentMethod, amount: payableTotal })).digest("hex");
+    return res.json({ cashfreeOrderId: data.order_id, paymentSessionId: data.payment_session_id, amount: payableTotal, checksum });
   } catch (e) {
     console.error("Prepare payment failed:", e.response?.data || e.message || e);
     return res.status(500).json({ error: "payment_initiation_failed" });
@@ -389,10 +305,9 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
 // Create Order after payment verification (new flow)
 router.post("/create-after-verify", auth, requireRole("customer"), async (req, res) => {
   const { cashfreeOrderId, cashfreePaymentId, cashfreeSignature, items, paymentMethod, notes, couponCode } = req.body || {};
-  if (!["CASHFREE", "COD_20"].includes(paymentMethod)) return res.status(400).json({ error: "invalid_payment_method" });
+  if (paymentMethod !== "CASHFREE") return res.status(400).json({ error: "invalid_payment_method" });
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "no_items" });
 
-  // Prevent duplicate order creation for the same payment
   const exists = await Order.findOne({ cashfreePaymentId: cashfreePaymentId });
   if (exists) return res.status(400).json({ error: "order_already_created" });
 
@@ -404,19 +319,9 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
     const products = await Product.find({ _id: { $in: uniqueIds }, isActive: true });
     if (products.length !== uniqueIds.length) return res.status(400).json({ error: "product_not_found" });
     
-    // Compute totals and coupon
     const totals = computeTotals(products, items);
     const { discount: coupDiscount, finalAmount: payableTotal, couponId } = await validateAndApplyCoupon(couponCode, totals.total);
     
-    // Verify Cashfree payment signature
-    const amountForSignature = paymentMethod === "COD_20" ? payableTotal * 0.2 : payableTotal;
-    const signatureData = `${cashfreeOrderId}${amountForSignature}`;
-    const expectedSignature = crypto
-      .createHmac("sha256", process.env.CASHFREE_SECRET_KEY)
-      .update(signatureData)
-      .digest("base64");
-    if (expectedSignature !== cashfreeSignature) return res.status(400).json({ error: "invalid_signature" });
-    // Stock re-check
     for (const it of items) {
       const p = products.find(x => x._id.toString() === it.productId);
       if (!p) return res.status(400).json({ error: "product_not_found" });
@@ -444,6 +349,7 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
         image: (v?.images?.[0]?.url || p?.images?.[0]?.url || "")
       };
     });
+
     const doc = await Order.create({
       customer: { name: cust.name, phone: cust.phone, email: cust.email || "" },
       shippingAddress: {
@@ -458,21 +364,18 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
       couponCode: couponCode?.toUpperCase() || "",
       couponDiscount: coupDiscount,
       status: "CONFIRMED",
-      paymentMethod,
-      paymentStatus: paymentMethod === "COD_20" ? "PARTIAL" : "PAID",
+      paymentMethod: "CASHFREE",
+      paymentStatus: "PAID",
       cashfreeOrderId,
       cashfreePaymentId,
       cashfreeSignature,
-      notes: notes || "",
-      codAdvancePercent: paymentMethod === "COD_20" ? 20 : 0,
-      codDueAmount: paymentMethod === "COD_20" ? Number((payableTotal * 0.8).toFixed(2)) : 0
+      notes: notes || ""
     });
 
     if (couponId) {
       await Coupon.findByIdAndUpdate(couponId, { $inc: { usedCount: 1 } });
     }
 
-    // --- STOCK MANAGEMENT ---
     for (const it of items) {
       const qty = Number(it.quantity || 0);
       if (it.variantSku) {
@@ -487,7 +390,6 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
         );
       }
     }
-    // Sync total product stock
     for (const id of uniqueIds) {
       const p = await Product.findById(id);
       if (p && p.variants && p.variants.length > 0) {
@@ -496,42 +398,37 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
         await p.save();
       }
     }
-    // ------------------------
 
-    // Billing only for full online payments
-    if (paymentMethod === "CASHFREE") {
-      try {
-        await createBillFromData({
-          customerData: { phone: doc.customer.phone, name: doc.customer.name, email: doc.customer.email },
-          items: doc.items.map(it => ({
-            product: it.product,
-            variantSku: it.variantSku ? String(it.variantSku) : undefined,
-            quantity: it.quantity
-          })),
-          paymentType: "CASHFREE",
-          existingOrderId: doc._id
-        });
-      } catch {}
-    }
+    try {
+      await createBillFromData({
+        customerData: { phone: doc.customer.phone, name: doc.customer.name, email: doc.customer.email },
+        items: doc.items.map(it => ({
+          product: it.product,
+          variantSku: it.variantSku ? String(it.variantSku) : undefined,
+          quantity: it.quantity
+        })),
+        paymentType: "CASHFREE",
+        existingOrderId: doc._id
+      });
+    } catch {}
+
     try {
       const to = cust.email || process.env.MAIL_TO || process.env.COMPANY_EMAIL || process.env.MAIL_FROM;
-      const paidText = paymentMethod === "COD_20" ?
-        `Advance Paid: ₹${Number(doc.totalEstimate * 0.2).toLocaleString("en-IN")}` :
-        `Amount Paid: ₹${Number(doc.totalEstimate).toLocaleString("en-IN")}`;
       const html = renderMail({
         heading: "Payment Confirmed",
         subheading: "We’ve confirmed your payment and are preparing your shipment.",
         highlight: `Order ID: ${doc._id}`,
         blocks: [
-          { label: "Payment Method", value: doc.paymentMethod },
-          { label: "Payment", value: paidText },
+          { label: "Payment Method", value: "CASHFREE" },
+          { label: "Amount Paid", value: `₹${Number(doc.totalEstimate).toLocaleString("en-IN")}` },
           { label: "Current Status", value: doc.status }
         ]
       });
-      if (to) await sendEmail({ to, subject: `Payment confirmed - ${process.env.COMPANY_NAME || "Click2Kart"}`, html });
+      if (to) await sendEmail({ to, subject: `Payment confirmed - ${process.env.COMPANY_NAME || "SmartOdisha"}`, html });
     } catch {}
-    // Attempt shipment creation
+
     try { await tryCreateShiprocketShipment(doc); } catch {}
+
     return res.json({ success: true, orderId: doc._id });
   } catch (e) {
     console.error("Create after verify error:", e);
@@ -553,11 +450,9 @@ router.post("/verify-payment", async (req, res) => {
     const order = await Order.findById(orderId);
     if (!order) return res.status(404).json({ error: "order_not_found" });
 
-    // Re-validate stock and totals before marking paid
     try {
       const ids = order.items.map(i => i.product.toString());
       const products = await Product.find({ _id: { $in: ids }, isActive: true });
-      // Stock check
       for (const it of order.items) {
         const p = products.find(x => x._id.toString() === it.product.toString());
         if (!p) return res.status(400).json({ error: "product_not_found" });
@@ -569,78 +464,52 @@ router.post("/verify-payment", async (req, res) => {
           return res.status(400).json({ error: "stock_changed" });
         }
       }
-      // Totals check with possible new bulk pricing
-      const recomputeItems = order.items.map(it => ({
-        productId: it.product.toString(),
-        variantSku: it.variantSku ? it.variantSku.toString() : undefined,
-        quantity: it.quantity
-      }));
-      const totals = computeTotals(products, recomputeItems);
-      const expected = order.paymentMethod === "COD_20" ? totals.total * 0.2 : totals.total;
-      // If amount drifted vs originally computed amount stored on order
-      const orderAmountValue = order.paymentMethod === "COD_20" ? order.totalEstimate * 0.2 : order.totalEstimate;
-      if (Math.abs(expected - orderAmountValue) > 0.01) {
-        return res.status(400).json({ error: "amount_mismatch" });
-      }
     } catch (err) {
       return res.status(400).json({ error: "revalidation_failed" });
     }
 
-    if (order.paymentMethod === "COD_20") {
-      order.paymentStatus = "PARTIAL";
-      order.status = "CONFIRMED";
-      order.advancePaidAmount = Number((order.totalEstimate * 0.2).toFixed(2));
-    } else {
-      order.paymentStatus = "PAID";
-      order.status = "CONFIRMED";
-    }
+    order.paymentStatus = "PAID";
+    order.status = "CONFIRMED";
     order.cashfreePaymentId = cashfreePaymentId;
     order.cashfreeSignature = cashfreeSignature;
     await order.save();
 
-    // Trigger automatic billing only for full online payments
-    if (order.paymentMethod === "CASHFREE") {
-      try {
-        await createBillFromData({
-          customerData: { phone: order.customer.phone, name: order.customer.name, email: order.customer.email },
-          items: order.items.map(it => ({
-            product: it.product,
-            variantSku: it.variantSku ? String(it.variantSku) : undefined,
-            quantity: it.quantity
-          })),
-          paymentType: "CASHFREE",
-          existingOrderId: order._id
-        });
-      } catch (err) {
-        console.error("Auto-billing failed after payment:", err);
-      }
-    }
     try {
-      await AuditLog.create({ actorId: "", actorRole: "system", type: "ORDER_STATUS", entityType: "ORDER", entityId: order._id.toString(), note: `Payment verified (${order.paymentMethod})` });
+      await createBillFromData({
+        customerData: { phone: order.customer.phone, name: order.customer.name, email: order.customer.email },
+        items: order.items.map(it => ({
+          product: it.product,
+          variantSku: it.variantSku ? String(it.variantSku) : undefined,
+          quantity: it.quantity
+        })),
+        paymentType: "CASHFREE",
+        existingOrderId: order._id
+      });
+    } catch (err) {
+      console.error("Auto-billing failed after payment:", err);
+    }
+
+    try {
+      await AuditLog.create({ actorId: "", actorRole: "system", type: "ORDER_STATUS", entityType: "ORDER", entityId: order._id.toString(), note: "Payment verified (CASHFREE)" });
       const to = order.customer?.email || process.env.MAIL_TO || process.env.COMPANY_EMAIL || process.env.MAIL_FROM;
-      const paidText = order.paymentMethod === "COD_20" ?
-        `Advance Paid: ₹${Number(order.totalEstimate * 0.2).toLocaleString("en-IN")}` :
-        `Amount Paid: ₹${Number(order.totalEstimate).toLocaleString("en-IN")}`;
       const html = renderMail({
         heading: "Payment Confirmed",
         subheading: "We’ve confirmed your payment and are preparing your shipment.",
         highlight: `Order ID: ${order._id}`,
         blocks: [
-          { label: "Payment Method", value: order.paymentMethod },
-          { label: "Payment", value: paidText },
+          { label: "Payment Method", value: "CASHFREE" },
+          { label: "Amount Paid", value: `₹${Number(order.totalEstimate).toLocaleString("en-IN")}` },
           { label: "Current Status", value: order.status }
         ]
       });
-      if (to) await sendEmail({ to, subject: `Payment confirmed - ${process.env.COMPANY_NAME || "Click2Kart"}`, html });
+      if (to) await sendEmail({ to, subject: `Payment confirmed - ${process.env.COMPANY_NAME || "SmartOdisha"}`, html });
     } catch {}
 
-    // Auto-create shipment after payment
     try {
       if (order.status === "CONFIRMED") {
-        // Optional: compute free shipping
         const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
         const perKg = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
-        const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 0);
+        const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
         const weight = 0.5;
         const variable = perKg * weight;
         const amt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
@@ -660,314 +529,6 @@ router.post("/verify-payment", async (req, res) => {
   } else {
     res.status(400).json({ error: "invalid_signature" });
   }
-});
-
-// Manual Payment Submission (UPI/Bank) - create order pending approval
-router.post("/manual-submit", auth, requireRole("customer"), async (req, res) => {
-  const { items, amountPaid, utr, note, codAdvance20, couponCode } = req.body || {};
-  if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "no_items" });
-  const cust = await Customer.findById(req.user.id).select("name phone email kyc address");
-  if (!cust) return res.status(404).json({ error: "customer_not_found" });
-  try {
-    const ids = items.map((x) => x.productId);
-    const products = await Product.find({ _id: { $in: ids }, isActive: true });
-    if (products.length !== ids.length) return res.status(400).json({ error: "product_not_found" });
-    const totals = computeTotals(products, items);
-
-    const { discount: coupDiscount, finalAmount: payableTotal, couponId } = await validateAndApplyCoupon(couponCode, totals.total);
-
-    const orderItems = totals.items.map((it) => {
-      const p = products.find(x => x._id.toString() === it.product.toString());
-      const v = it.variantSku ? (p?.variants || []).find(v => v.sku === String(it.variantSku)) : null;
-      return { product: it.product, variantSku: it.variantSku, name: it.name, price: it.price, gst: it.gst, quantity: it.quantity, lineTotal: it.lineTotal, image: (v?.images?.[0]?.url || p?.images?.[0]?.url || "") };
-    });
-    const doc = await Order.create({
-      customer: { name: cust.name, phone: cust.phone, email: cust.email || "" },
-      shippingAddress: {
-        line1: cust.kyc?.addressLine1 || cust.address || "",
-        line2: cust.kyc?.addressLine2 || "",
-        city: cust.kyc?.city || "",
-        state: cust.kyc?.state || "",
-        pincode: cust.kyc?.pincode || ""
-      },
-      items: orderItems,
-      totalEstimate: payableTotal,
-      couponCode: couponCode?.toUpperCase() || "",
-      couponDiscount: coupDiscount,
-      status: "PENDING_ADMIN_APPROVAL",
-      paymentMethod: codAdvance20 ? "COD_20" : "MANUAL",
-      paymentStatus: "PAYMENT_SUBMITTED",
-      notes: note || "",
-      manualPayment: { amountPaid: Number(amountPaid || 0), utr: String(utr || ""), note: String(note || "") },
-      codAdvancePercent: codAdvance20 ? 20 : 0,
-      codDueAmount: codAdvance20 ? Number((payableTotal * 0.8).toFixed(2)) : 0
-    });
-
-    if (couponId) {
-      await Coupon.findByIdAndUpdate(couponId, { $inc: { usedCount: 1 } });
-    }
-
-    // Notify admin via WebSocket
-    try {
-      notifyAdmin("new_manual_payment", doc);
-    } catch (err) {
-      console.error("Failed to notify admin via socket:", err);
-    }
-
-    try {
-      const to = cust.email || process.env.MAIL_TO || process.env.COMPANY_EMAIL || process.env.MAIL_FROM;
-      const html = renderMail({
-        heading: codAdvance20 ? "COD Advance Submitted" : "Payment Submitted",
-        subheading: codAdvance20 ? "We have received your 20% COD advance. Our team will verify shortly." : "We have received your payment details. Our team will verify shortly.",
-        highlight: `Order ID: ${doc._id}`,
-        blocks: [
-          { label: "Payment Method", value: codAdvance20 ? "COD (20% via Manual UPI/Bank)" : "Manual (UPI/Bank)" },
-          { label: "Amount Submitted", value: `₹${Number(amountPaid || 0).toLocaleString("en-IN")}` },
-          { label: "UTR", value: String(utr || "-") },
-          { label: "Status", value: "Pending Admin Approval" }
-        ]
-      });
-      if (to) await sendEmail({ to, subject: `Payment submitted - ${process.env.COMPANY_NAME || "Click2Kart"}`, html });
-    } catch {}
-    return res.json({ success: true, orderId: doc._id });
-  } catch {
-    return res.status(500).json({ error: "manual_submit_failed" });
-  }
-});
-
-// Admin approve manual payment
-router.patch("/:id/approve-manual", auth, requirePermission("orders"), async (req, res) => {
-  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
-  const order = await Order.findById(req.params.id);
-  if (!order) return res.status(404).json({ error: "not_found" });
-
-  // Prevent duplicate approval
-  if (order.status === "CONFIRMED" || order.paymentStatus === "PAID") {
-    return res.status(400).json({ error: "already_approved" });
-  }
-
-  if (order.paymentMethod === "MANUAL") {
-    order.paymentStatus = "PAID";
-    order.status = "CONFIRMED";
-  } else if (order.paymentMethod === "COD_20") {
-    order.paymentStatus = "PARTIAL";
-    order.status = "CONFIRMED";
-    order.advancePaidAmount = order.manualPayment?.amountPaid || 0;
-  } else {
-    return res.status(400).json({ error: "not_manual_order" });
-  }
-
-  await order.save();
-
-  // Trigger automatic billing only for full online payments (MANUAL in this case)
-  if (order.paymentMethod === "MANUAL") {
-    try {
-      await createBillFromData({
-        customerData: { phone: order.customer.phone, name: order.customer.name, email: order.customer.email },
-        items: order.items.map(it => ({ product: it.product, variantSku: it.variantSku, quantity: it.quantity })),
-        paymentType: "MANUAL",
-        existingOrderId: order._id
-      });
-    } catch (err) {
-      console.error("Auto-billing failed after manual approval:", err);
-    }
-  }
-
-  // Auto-create shipment after approval
-  try {
-    if (order.status === "CONFIRMED") {
-      // Optional: compute free shipping
-      const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
-      const perKg = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
-      const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 0);
-      const weight = 0.5;
-      const variable = perKg * weight;
-      const amt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
-      order.shipping_charge = amt;
-      order.shipping_discount = amt;
-      await order.save();
-
-      const created = await tryCreateShiprocketShipment(order);
-      if (!created) {
-        order.shipment_status = "CREATION_FAILED";
-        await order.save();
-      }
-    }
-  } catch (err) {
-    console.error("Auto-shipment failed after manual approval:", err);
-  }
-
-  try {
-    const to = order.customer?.email || process.env.MAIL_TO || process.env.COMPANY_EMAIL || process.env.MAIL_FROM;
-    const html = renderMail({
-      heading: order.paymentMethod === "COD_20" ? "COD Advance Approved" : "Payment Approved",
-      subheading: order.paymentMethod === "COD_20" ? "Your 20% COD advance has been verified. We are confirming your order." : "Your payment has been verified. We are confirming your order.",
-      highlight: `Order ID: ${order._id}`,
-      blocks: [
-        { label: "Payment Method", value: order.paymentMethod === "COD_20" ? "COD (20% via Manual UPI/Bank)" : "Manual (UPI/Bank)" },
-        { label: "Current Status", value: "CONFIRMED" }
-      ]
-    });
-    if (to) await sendEmail({ to, subject: `Payment approved - ${process.env.COMPANY_NAME || "Click2Kart"}`, html });
-  } catch {}
-
-  try {
-    await AuditLog.create({
-      actorId: req.user.id,
-      actorRole: req.user.role,
-      type: "PAYMENT_VERIFICATION",
-      entityType: "ORDER",
-      entityId: order._id.toString(),
-      note: `Manual payment approved for ${order.paymentMethod}`,
-      after: { paymentStatus: order.paymentStatus, status: order.status }
-    });
-  } catch (err) {
-    console.error("Failed to create audit log:", err);
-  }
-
-  return res.json({ success: true });
-});
-
-// Admin reject manual payment
-router.patch("/:id/reject-manual", auth, requirePermission("orders"), async (req, res) => {
-  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
-  const order = await Order.findById(req.params.id);
-  if (!order) return res.status(404).json({ error: "not_found" });
-  if (order.paymentMethod !== "MANUAL" && order.paymentMethod !== "COD_20") return res.status(400).json({ error: "not_manual_order" });
-
-  order.paymentStatus = "FAILED";
-  order.status = "CANCELLED";
-  await order.save();
-
-  try {
-    const to = order.customer?.email || process.env.MAIL_TO || process.env.COMPANY_EMAIL || process.env.MAIL_FROM;
-    const html = renderMail({
-      heading: "Payment Rejected",
-      subheading: "We could not verify your payment. Please contact support or resubmit.",
-      highlight: `Order ID: ${order._id}`,
-      blocks: [
-        { label: "Payment Method", value: order.paymentMethod },
-        { label: "Current Status", value: "CANCELLED" }
-      ]
-    });
-    if (to) await sendEmail({ to, subject: `Payment rejected - ${process.env.COMPANY_NAME || "Click2Kart"}`, html });
-  } catch {}
-
-  try {
-    await AuditLog.create({
-      actorId: req.user.id,
-      actorRole: req.user.role,
-      type: "PAYMENT_VERIFICATION",
-      entityType: "ORDER",
-      entityId: order._id.toString(),
-      note: `Manual payment rejected for ${order.paymentMethod}`,
-      after: { paymentStatus: order.paymentStatus, status: order.status }
-    });
-  } catch (err) {
-    console.error("Failed to create audit log:", err);
-  }
-
-  return res.json({ success: true });
-});
-
-// Get manual payment verification history
-router.get("/payment-history", auth, requirePermission("orders"), async (req, res) => {
-  try {
-    const logs = await AuditLog.find({ type: "PAYMENT_VERIFICATION" })
-      .sort({ createdAt: -1 })
-      .limit(50);
-
-    // Enrich with order details
-    const orderIds = logs.map(l => l.entityId);
-    const orders = await Order.find({ _id: { $in: orderIds } }).select("customer totalEstimate paymentMethod manualPayment");
-
-    const enriched = logs.map(log => {
-      const order = orders.find(o => o._id.toString() === log.entityId);
-      return {
-        ...log.toObject(),
-        order: order || null
-      };
-    });
-
-    res.json(enriched);
-  } catch (err) {
-    res.status(500).json({ error: "failed_to_fetch_history" });
-  }
-});
-
-// Finalize COD and generate bill (admin)
-router.patch("/:id/finalize-cod", auth, requirePermission("orders"), async (req, res) => {
-  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
-  const order = await Order.findById(req.params.id);
-  if (!order) return res.status(404).json({ error: "not_found" });
-
-  // Prevent duplicate finalization
-  if (order.paymentStatus === "PAID") {
-    return res.status(400).json({ error: "already_paid" });
-  }
-
-  if (order.paymentMethod !== "COD_20") return res.status(400).json({ error: "not_cod_order" });
-  if (order.paymentStatus !== "PARTIAL") return res.status(400).json({ error: "advance_not_paid" });
-
-  order.paymentStatus = "PAID";
-  await order.save();
-
-  try {
-    await createBillFromData({
-      customerData: { phone: order.customer.phone, name: order.customer.name, email: order.customer.email },
-      items: order.items.map(it => ({ product: it.product, variantSku: it.variantSku, quantity: it.quantity })),
-      paymentType: "CASH",
-      existingOrderId: order._id
-    });
-  } catch (err) {
-    console.error("Billing failed after COD finalize:", err);
-  }
-  res.json({ success: true });
-});
-
-// Admin approves Manual/Offline Payment
-router.patch("/:id/approve-cash", auth, requirePermission("orders"), async (req, res) => {
-  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
-  const order = await Order.findById(req.params.id);
-  if (!order) return res.status(404).json({ error: "not_found" });
-
-  // Prevent duplicate approval
-  if (order.status === "CONFIRMED" || order.paymentStatus === "PAID") {
-    return res.status(400).json({ error: "already_approved" });
-  }
-
-  // Accept both CASH and COD_20 (for advance verification)
-  if (!["CASH", "COD_20"].includes(order.paymentMethod)) {
-    return res.status(400).json({ error: "not_a_manual_or_cod_order" });
-  }
-
-  if (order.paymentMethod === "CASH") {
-    order.paymentStatus = "PAID";
-  } else {
-    // For COD_20, it's PARTIAL since only advance is paid
-    order.paymentStatus = "PARTIAL";
-  }
-
-  order.status = "CONFIRMED";
-  await order.save();
-
-  // Trigger billing immediately upon confirmation
-  try {
-    await createBillFromData({
-      customerData: { phone: order.customer.phone, name: order.customer.name, email: order.customer.email },
-      items: order.items.map(it => ({
-        product: it.product,
-        quantity: it.quantity,
-        variantSku: it.variantSku
-      })),
-      paymentType: order.paymentMethod,
-      existingOrderId: order._id
-    });
-  } catch (err) {
-    console.error("Billing failed after approval:", err);
-  }
-
-  res.json({ success: true, order });
 });
 
 router.get("/my-orders", async (req, res) => {
@@ -992,7 +553,6 @@ router.get("/", auth, requirePermission("orders"), async (req, res) => {
   if (status) {
     filter.status = status;
   } else {
-    // By default, exclude orders waiting for manual payment verification
     filter.status = { $ne: "PENDING_ADMIN_APPROVAL" };
   }
   const items = await Order.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit);
@@ -1001,102 +561,9 @@ router.get("/", auth, requirePermission("orders"), async (req, res) => {
 
 router.get("/:id", auth, requirePermission("orders"), async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
-  const doc = await Order.findById(req.params.id);
-  if (!doc) return res.status(404).json({ error: "not_found" });
-  res.json(doc);
-});
-
-// Admin update status/LRN
-router.patch("/:id/status", auth, requireRole("admin"), async (req, res) => {
-  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
-  const { status, lrn } = req.body || {};
-  const order = await Order.findById(req.params.id);
-  if (!order) return res.status(404).json({ error: "not_found" });
-
-  if (lrn !== undefined) {
-    order.lrn = lrn;
-  }
-
-  if (status) {
-    const allowed = new Set(["NEW", "CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED", "RETURNED", "FULFILLED"]);
-    if (!allowed.has(status)) return res.status(400).json({ error: "invalid_status" });
-    const okTransitions = {
-      NEW: new Set(["CONFIRMED", "CANCELLED"]),
-      PENDING_CASH_APPROVAL: new Set(["CONFIRMED", "CANCELLED"]),
-      CONFIRMED: new Set(["SHIPPED", "CANCELLED"]),
-      SHIPPED: new Set(["DELIVERED", "RETURNED"]),
-      DELIVERED: new Set(["FULFILLED", "RETURNED"]),
-      CANCELLED: new Set([]),
-      RETURNED: new Set([]),
-      FULFILLED: new Set([])
-    };
-    const curr = order.status;
-    if (!okTransitions[curr] || !okTransitions[curr].has(status)) return res.status(400).json({ error: "invalid_transition" });
-    order.status = status;
-    try {
-      await AuditLog.create({ actorId: req.user?.id || "", actorRole: req.user?.role || "", type: "ORDER_STATUS", entityType: "ORDER", entityId: order._id.toString(), note: `Status ${curr} → ${status}` });
-    } catch {}
-  }
-
-  const updated = await order.save();
-  if (!updated) return res.status(404).json({ error: "not_found" });
-  res.json(updated);
-});
-
-// Customer delivery feedback (rating only after order fulfilled)
-router.post("/:id/feedback", auth, requireRole("customer"), async (req, res) => {
-  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
-  const r = Number(req.body?.rating);
-  if (!Number.isFinite(r) || r < 1 || r > 5) return res.status(400).json({ error: "invalid_rating" });
-  const order = await Order.findById(req.params.id);
-  if (!order) return res.status(404).json({ error: "not_found" });
-  const cust = await Customer.findById(req.user.id).select("phone");
-  if (!cust || cust.phone !== order.customer.phone) return res.status(403).json({ error: "forbidden" });
-  if (order.status !== "FULFILLED") return res.status(400).json({ error: "not_delivered" });
-  order.feedbackRating = r;
-  await order.save();
-  res.json({ success: true, feedbackRating: r });
-});
-
-// Admin: mark as packed
-router.patch("/:id/pack", auth, requireRole("admin"), async (req, res) => {
-  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
-  const order = await Order.findById(req.params.id);
-  if (!order) return res.status(404).json({ error: "not_found" });
-  if (order.status === "CANCELLED") return res.status(400).json({ error: "cancelled_order" });
-  order.shipping = order.shipping || {};
-  order.shipping.status = "PACKED";
-  await order.save();
-  res.json({ success: true, order });
-});
-
-// Admin: create/update shipment (manual)
-router.patch("/:id/ship", auth, requireRole("admin"), async (req, res) => {
-  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
-  const { provider, waybill, trackingUrl } = req.body || {};
-  if (!provider || !waybill) return res.status(400).json({ error: "missing_fields" });
-  const order = await Order.findById(req.params.id);
-  if (!order) return res.status(404).json({ error: "not_found" });
-
-  // Prevent duplicate shipping
-  if (order.status === "SHIPPED") {
-    return res.status(400).json({ error: "already_shipped" });
-  }
-
-  if (order.status === "CANCELLED") return res.status(400).json({ error: "cancelled_order" });
-  order.shipping = order.shipping || {};
-  order.shipping.provider = String(provider);
-  order.shipping.waybill = String(waybill);
-  order.shipping.trackingUrl = trackingUrl || order.shipping.trackingUrl || "";
-  order.shipping.status = "SHIPPED";
-  const prev = order.status;
-  if (prev !== "CONFIRMED" && prev !== "SHIPPED") return res.status(400).json({ error: "invalid_transition" });
-  order.status = "SHIPPED";
-  try {
-    await AuditLog.create({ actorId: req.user?.id || "", actorRole: req.user?.role || "", type: "ORDER_STATUS", entityType: "ORDER", entityId: order._id.toString(), note: `Status ${prev} → SHIPPED (manual)` });
-  } catch {}
-  const updated = await order.save();
-  res.json(updated);
+  const item = await Order.findById(req.params.id);
+  if (!item) return res.status(404).json({ error: "not_found" });
+  res.json(item);
 });
 
 export default router;
