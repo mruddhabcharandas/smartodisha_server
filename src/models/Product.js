@@ -21,9 +21,6 @@ const productSchema = new mongoose.Schema(
     weight: { type: Number, default: 0, min: 0 }, // weight in grams
     gst: { type: Number, default: 0, min: 0 },
     mrp: { type: Number, min: 0 },
-    minOrderQty: { type: Number, default: 1, min: 0 },
-    store: { type: String, default: "" },
-    section: { type: String, default: "" },
     highlights: { type: [String], default: [] },
     specifications: {
       type: [
@@ -34,18 +31,6 @@ const productSchema = new mongoose.Schema(
       ],
       default: []
     },
-    bulkDiscountQuantity: { type: Number, default: 0, min: 0 },
-    bulkDiscountPriceReduction: { type: Number, default: 0, min: 0 },
-    bulkTiers: {
-      type: [
-        {
-          quantity: { type: Number, min: 1 },
-          priceReduction: { type: Number, min: 0 }
-        }
-      ],
-      default: []
-    },
-    packSize: { type: Number, default: 1, min: 1 }, // Pack size per unit (e.g., 12 items per pack)
     attributes: { type: [String], default: [] }, // e.g. ["color", "ram", "storage"] or ["model"]
     variants: {
       type: [
