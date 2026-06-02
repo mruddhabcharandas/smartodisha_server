@@ -55,7 +55,11 @@ const orderSchema = new mongoose.Schema(
     },
     shiprocketOrderId: { type: String, default: "" },
     shiprocketShipmentId: { type: String, default: "" },
-    shiprocketAwbNumber: { type: String, default: "" }
+    shiprocketAwbNumber: { type: String, default: "" },
+    refundAmount: { type: Number, default: 0 },
+    refundReason: { type: String, default: "" },
+    refundId: { type: String, default: "" },
+    refundStatus: { type: String, enum: ["NONE", "PENDING", "SUCCESS", "FAILED"], default: "NONE" }
   },
   { timestamps: true }
 );

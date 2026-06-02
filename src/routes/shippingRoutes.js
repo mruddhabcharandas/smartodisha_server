@@ -171,14 +171,27 @@ router.post("/shiprocket/create", auth, requirePermission("orders"), async (req,
     if (!addr.pincode || !addr.line1) {
       const Customer = (await import("../models/Customer.js")).default;
       const cust = await Customer.findOne({ phone: order.customer.phone });
-      if (cust && cust.kyc) {
-        addr = {
-          line1: cust.kyc.addressLine1 || cust.address || "",
-          line2: cust.kyc.addressLine2 || "",
-          city: cust.kyc.city || "",
-          state: cust.kyc.state || "",
-          pincode: cust.kyc.pincode || ""
-        };
+      if (cust) {
+        if (cust.address) {
+          // Try to parse address components from cust.address string
+          const pincodeMatch = cust.address.match(/\b(\d{6})\b/);
+          const cityStateMatch = cust.address.match(/,\s*([^,]+),\s*([^,]+)\s*-\s*\d{6}/);
+          addr = {
+            line1: cust.address.split(',').slice(0, 2).join(',').trim(),
+            line2: '',
+            city: cityStateMatch ? cityStateMatch[1].trim() : '',
+            state: cityStateMatch ? cityStateMatch[2].trim() : '',
+            pincode: pincodeMatch ? pincodeMatch[1] : (cust.kyc?.pincode || '')
+          };
+        } else if (cust.kyc) {
+          addr = {
+            line1: cust.kyc.addressLine1 || '',
+            line2: cust.kyc.addressLine2 || '',
+            city: cust.kyc.city || '',
+            state: cust.kyc.state || '',
+            pincode: cust.kyc.pincode || ''
+          };
+        }
       }
     }
 

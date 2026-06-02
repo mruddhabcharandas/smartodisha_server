@@ -20,10 +20,11 @@ router.post("/cashfree", express.raw({ type: "application/json" }), async (req, 
     }
 
     const payload = JSON.parse(body);
-    const orderId = payload.data.order.order_id;
-    const orderStatus = payload.data.order.order_status;
+    const eventType = payload.type;
 
-    if (orderStatus === "PAID" || orderStatus === "SUCCESS") {
+    // Handle payment success
+    if ((eventType === "PAYMENT_SUCCESS" || eventType === "ORDER_PAID") && payload.data?.order) {
+      const orderId = payload.data.order.order_id;
       const order = await Order.findOne({ cashfreeOrderId: orderId });
       if (order && order.paymentStatus !== "PAID") {
         order.paymentStatus = "PAID";
@@ -37,6 +38,23 @@ router.post("/cashfree", express.raw({ type: "application/json" }), async (req, 
             existingOrderId: order._id
           });
         } catch {}
+      }
+    }
+
+    // Handle refund events
+    if (eventType === "REFUND_SUCCESS" && payload.data?.refund) {
+      const refundId = payload.data.refund.refund_id;
+      const orderId = payload.data.refund.order_id;
+      const refundStatus = payload.data.refund.refund_status;
+      
+      const order = await Order.findOne({ cashfreeOrderId: orderId });
+      if (order) {
+        if (refundStatus === "SUCCESS") {
+          order.refundStatus = "SUCCESS";
+        } else if (refundStatus === "FAILED") {
+          order.refundStatus = "FAILED";
+        }
+        await order.save();
       }
     }
 

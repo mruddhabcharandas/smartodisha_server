@@ -24,10 +24,30 @@ router.get("/me", auth, async (req, res) => {
     name: user.name,
     email: user.email || "",
     phone: user.phone,
-    defaultAddress: user.address || "",
+    address: user.address || "",
     isKycComplete: !!user.isKycComplete,
     kyc: user.kyc || {},
     role: "customer"
+  });
+});
+
+router.put("/profile", auth, requireRole("customer"), async (req, res) => {
+  const payload = req.body || {};
+  const user = await Customer.findById(req.user.id);
+  if (!user) return res.status(404).json({ error: "not_found" });
+
+  if (typeof payload.name === "string" && payload.name.trim()) {
+    user.name = payload.name.trim();
+  }
+  if (typeof payload.address === "string") {
+    user.address = payload.address.trim();
+  }
+  
+  await user.save();
+
+  res.json({
+    name: user.name,
+    address: user.address
   });
 });
 
@@ -51,9 +71,14 @@ router.put("/kyc", auth, requireRole("customer"), async (req, res) => {
   
   user.kyc = kyc;
   user.isKycComplete = !!requiredFilled;
+  
+  if (requiredFilled) {
+    user.address = `${kyc.addressLine1}${kyc.addressLine2 ? `, ${kyc.addressLine2}` : ''}, ${kyc.city}, ${kyc.district}, ${kyc.state} - ${kyc.pincode}`;
+  }
+  
   await user.save();
 
-  res.json({ isKycComplete: user.isKycComplete, kyc: user.kyc });
+  res.json({ isKycComplete: user.isKycComplete, kyc: user.kyc, address: user.address });
 });
 
 export default router;

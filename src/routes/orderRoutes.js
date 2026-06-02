@@ -45,14 +45,26 @@ const tryCreateShiprocketShipment = async (order) => {
     let addr = order.shippingAddress || {};
     if (!addr.pincode || !addr.line1) {
       const cust = await Customer.findOne({ phone: order.customer.phone });
-      if (cust && cust.kyc) {
-        addr = {
-          line1: cust.kyc.addressLine1 || cust.address || "",
-          line2: cust.kyc.addressLine2 || "",
-          city: cust.kyc.city || "",
-          state: cust.kyc.state || "",
-          pincode: cust.kyc.pincode || ""
-        };
+      if (cust) {
+        if (cust.address) {
+          const pincodeMatch = cust.address.match(/\b(\d{6})\b/);
+          const cityStateMatch = cust.address.match(/,\s*([^,]+),\s*([^,]+)\s*-\s*\d{6}/);
+          addr = {
+            line1: cust.address.split(',').slice(0, 2).join(',').trim(),
+            line2: '',
+            city: cityStateMatch ? cityStateMatch[1].trim() : '',
+            state: cityStateMatch ? cityStateMatch[2].trim() : '',
+            pincode: pincodeMatch ? pincodeMatch[1] : (cust.kyc?.pincode || '')
+          };
+        } else if (cust.kyc) {
+          addr = {
+            line1: cust.kyc.addressLine1 || '',
+            line2: cust.kyc.addressLine2 || '',
+            city: cust.kyc.city || '',
+            state: cust.kyc.state || '',
+            pincode: cust.kyc.pincode || ''
+          };
+        }
       }
     }
 
@@ -564,6 +576,115 @@ router.get("/:id", auth, requirePermission("orders"), async (req, res) => {
   const item = await Order.findById(req.params.id);
   if (!item) return res.status(404).json({ error: "not_found" });
   res.json(item);
+});
+
+// Cancel Order with 5% deduction and auto refund
+router.post("/:id/cancel", auth, requirePermission("orders"), async (req, res) => {
+  const { reason } = req.body || {};
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "not_found" });
+    
+    // Check if order can be cancelled
+    if (["CANCELLED", "RETURNED"].includes(order.status)) {
+      return res.status(400).json({ error: "order_already_cancelled" });
+    }
+    
+    if (order.paymentStatus !== "PAID" || order.paymentMethod !== "CASHFREE") {
+      return res.status(400).json({ error: "cannot_cancel_unpaid_order" });
+    }
+    
+    // Calculate refund amount (95% of total)
+    const refundAmount = Math.max(0, Math.round((order.totalEstimate * 0.95) * 100) / 100);
+    const deductionAmount = order.totalEstimate - refundAmount;
+    
+    // Restore stock
+    for (const item of order.items) {
+      const qty = item.quantity;
+      if (item.variantSku) {
+        await Product.updateOne(
+          { _id: item.product, "variants.sku": item.variantSku },
+          { $inc: { "variants.$.stock": qty } }
+        );
+      } else {
+        await Product.updateOne(
+          { _id: item.product },
+          { $inc: { stock: qty } }
+        );
+      }
+    }
+    
+    // Update product stock summary
+    const productIds = order.items.map(i => i.product.toString());
+    for (const id of productIds) {
+      const p = await Product.findById(id);
+      if (p && p.variants && p.variants.length > 0) {
+        const sum = p.variants.filter(v => v.isActive !== false).reduce((s, v) => s + (v.stock || 0), 0);
+        p.stock = sum;
+        await p.save();
+      }
+    }
+    
+    // Update order status and refund details
+    order.status = "CANCELLED";
+    order.refundAmount = refundAmount;
+    order.refundReason = reason || "Cancelled by admin";
+    order.refundStatus = "PENDING";
+    await order.save();
+    
+    // Create Cashfree refund
+    try {
+      const refundPayload = {
+        refund_id: `refund_${order._id.toString()}_${Date.now()}`,
+        refund_amount: refundAmount,
+        refund_note: reason || "Order cancelled by admin",
+        refund_speed: "STANDARD" // or "INSTANT"
+      };
+      
+      const { data } = await cashfree.post(
+        `/pg/orders/${order.cashfreeOrderId}/refunds`,
+        refundPayload
+      );
+      
+      // Update order with refund details from Cashfree
+      order.refundId = data.refund_id;
+      order.refundStatus = "PENDING"; // Cashfree will send webhook
+      await order.save();
+      
+      // Log audit
+      await AuditLog.create({
+        actorId: req.user.id,
+        actorRole: req.user.role,
+        type: "ORDER_CANCEL",
+        entityType: "ORDER",
+        entityId: order._id.toString(),
+        note: `Order cancelled. Refund amount: ₹${refundAmount.toLocaleString()}, Deduction: ₹${deductionAmount.toLocaleString()}`
+      });
+      
+      res.json({
+        success: true,
+        message: "Order cancelled and refund initiated",
+        order,
+        refundAmount,
+        deductionAmount
+      });
+    } catch (cashfreeErr) {
+      console.error("Cashfree refund failed:", cashfreeErr.response?.data || cashfreeErr.message);
+      order.refundStatus = "FAILED";
+      await order.save();
+      
+      return res.status(500).json({
+        error: "order_cancelled_but_refund_failed",
+        message: "Order has been cancelled, but refund failed. Please initiate refund manually.",
+        order
+      });
+    }
+  } catch (e) {
+    console.error("Cancel order error:", e);
+    res.status(500).json({ error: "cancel_failed", message: e.message });
+  }
 });
 
 export default router;
