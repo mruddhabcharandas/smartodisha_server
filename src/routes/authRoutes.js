@@ -16,6 +16,11 @@ const validateEmailFormat = (email) => {
     );
 };
 
+const validatePhoneNumber = (phone) => {
+  const digitsOnly = String(phone).replace(/\D/g, "");
+  return digitsOnly.length === 10;
+};
+
 // ADMIN LOGIN
 router.post("/login", rateLimit("admin-login", 5, 900), async (req, res) => {
   const { email, password } = req.body || {};
@@ -58,8 +63,12 @@ router.post("/customer/signup", rateLimit("customer-signup", 3, 600), async (req
   const { name, email, phone, password } = req.body || {};
   if (!name || !email || !phone || !password) return res.status(400).json({ error: "missing_fields" });
   if (!validateEmailFormat(email)) return res.status(400).json({ error: "invalid_email_format" });
+  
+  // Clean and validate phone number
+  const cleanedPhone = String(phone).replace(/\D/g, "");
+  if (!validatePhoneNumber(cleanedPhone)) return res.status(400).json({ error: "invalid_phone" });
 
-  const exists = await Customer.findOne({ $or: [{ email: email.toLowerCase() }, { phone }] });
+  const exists = await Customer.findOne({ $or: [{ email: email.toLowerCase() }, { phone: cleanedPhone }] });
   if (exists) return res.status(400).json({ error: "user_already_exists" });
 
   const otp = Math.floor(1000 + Math.random() * 9000).toString();
@@ -67,7 +76,7 @@ router.post("/customer/signup", rateLimit("customer-signup", 3, 600), async (req
 
   await OTP.findOneAndUpdate(
     { email: email.toLowerCase(), purpose: "SIGNUP" },
-    { otp, expiresAt, metadata: { name, phone, password } },
+    { otp, expiresAt, metadata: { name, phone: cleanedPhone, password } },
     { upsert: true }
   );
 
@@ -263,10 +272,14 @@ router.post("/customer/google/signup", async (req, res) => {
   try {
     const { email, name, phone } = req.body || {};
     if (!email || !phone || !name) return res.status(400).json({ error: "missing_fields" });
+    
+    // Clean and validate phone number
+    const cleanedPhone = String(phone).replace(/\D/g, "");
+    if (!validatePhoneNumber(cleanedPhone)) return res.status(400).json({ error: "invalid_phone" });
 
     // Check if customer already exists
     const existingCustomer = await Customer.findOne({ 
-      $or: [{ email: email.toLowerCase().trim() }, { phone }] 
+      $or: [{ email: email.toLowerCase().trim() }, { phone: cleanedPhone }] 
     });
     if (existingCustomer) {
       if (existingCustomer.email === email.toLowerCase().trim()) {
@@ -290,7 +303,7 @@ router.post("/customer/google/signup", async (req, res) => {
     const customer = await Customer.create({
       name,
       email: email.toLowerCase().trim(),
-      phone,
+      phone: cleanedPhone,
       isVerified: true,
       isActive: true
     });
