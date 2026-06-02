@@ -8,7 +8,7 @@ router.get("/me", auth, async (req, res) => {
   if (req.user.role === "admin") {
     const Admin = (await import("../models/Admin.js")).default;
     const admin = await Admin.findById(req.user.id).select("name email");
-    if (!admin) return res.status(404).json({ error: "not_found" });
+    if (!admin) return res.status(404).json({ error: "not found" });
     return res.json({
       id: admin._id.toString(),
       name: admin.name,
@@ -17,14 +17,15 @@ router.get("/me", auth, async (req, res) => {
     });
   }
 
-  const user = await Customer.findById(req.user.id).select("name email phone address isKycComplete kyc");
-  if (!user) return res.status(404).json({ error: "not_found" });
+  const user = await Customer.findById(req.user.id).select("name email phone address avatar isKycComplete kyc");
+  if (!user) return res.status(404).json({ error: "not found" });
   res.json({
     id: user._id.toString(),
     name: user.name,
     email: user.email || "",
     phone: user.phone,
     address: user.address || "",
+    avatar: user.avatar || "",
     isKycComplete: !!user.isKycComplete,
     kyc: user.kyc || {},
     role: "customer"
@@ -34,7 +35,7 @@ router.get("/me", auth, async (req, res) => {
 router.put("/profile", auth, requireRole("customer"), async (req, res) => {
   const payload = req.body || {};
   const user = await Customer.findById(req.user.id);
-  if (!user) return res.status(404).json({ error: "not_found" });
+  if (!user) return res.status(404).json({ error: "not found" });
 
   if (typeof payload.name === "string" && payload.name.trim()) {
     user.name = payload.name.trim();
@@ -42,12 +43,16 @@ router.put("/profile", auth, requireRole("customer"), async (req, res) => {
   if (typeof payload.address === "string") {
     user.address = payload.address.trim();
   }
+  if (typeof payload.avatar === "string") {
+    user.avatar = payload.avatar.trim();
+  }
   
   await user.save();
 
   res.json({
     name: user.name,
-    address: user.address
+    address: user.address,
+    avatar: user.avatar
   });
 });
 
