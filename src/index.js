@@ -98,18 +98,25 @@ const ensureDefaultAdmin = async () => {
 };
 
 const start = async () => {
-  await connectIfConfigured();
-  await connectRedis();
-  
-  // Warm cache on start (async to not block server start)
-  warmCache().catch(err => console.error("Warming Error:", err));
-
-  await ensureDefaultAdmin();
+  // Create server and start listening immediately for Render port detection
   const server = http.createServer(app);
   initSocket(server);
   server.listen(PORT, "0.0.0.0", () => {
     console.log(`server running on port ${PORT}`);
   });
+
+  // Then do async setup in the background
+  try {
+    await connectIfConfigured();
+    await connectRedis();
+    
+    // Warm cache on start (async to not block server start)
+    warmCache().catch(err => console.error("Warming Error:", err));
+
+    await ensureDefaultAdmin();
+  } catch (err) {
+    console.error("Error during server setup:", err);
+  }
 };
 
 start();
