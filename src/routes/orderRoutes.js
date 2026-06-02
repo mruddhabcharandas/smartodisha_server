@@ -188,9 +188,8 @@ router.post("/", auth, requireRole("customer"), async (req, res) => {
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "no_items" });
   if (!["CASH", "CASHFREE", "COD_20", "MANUAL"].includes(paymentMethod)) return res.status(400).json({ error: "invalid_payment_method" });
 
-  const cust = await Customer.findById(req.user.id).select("name phone email isKycComplete kyc address");
+  const cust = await Customer.findById(req.user.id).select("name phone email kyc address");
   if (!cust) return res.status(404).json({ error: "customer_not_found" });
-  if (!cust.isKycComplete) return res.status(403).json({ error: "kyc_required" });
 
   const ids = items.map((x) => x.productId);
   const products = await Product.find({ _id: { $in: ids }, isActive: true });
@@ -397,9 +396,8 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
   const exists = await Order.findOne({ cashfreePaymentId: cashfreePaymentId });
   if (exists) return res.status(400).json({ error: "order_already_created" });
 
-  const cust = await Customer.findById(req.user.id).select("name phone email isKycComplete kyc address");
+  const cust = await Customer.findById(req.user.id).select("name phone email kyc address");
   if (!cust) return res.status(404).json({ error: "customer_not_found" });
-  if (!cust.isKycComplete) return res.status(403).json({ error: "kyc_required" });
 
   try {
     const uniqueIds = [...new Set(items.map((x) => x.productId))];
@@ -668,9 +666,8 @@ router.post("/verify-payment", async (req, res) => {
 router.post("/manual-submit", auth, requireRole("customer"), async (req, res) => {
   const { items, amountPaid, utr, note, codAdvance20, couponCode } = req.body || {};
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "no_items" });
-  const cust = await Customer.findById(req.user.id).select("name phone email isKycComplete kyc address");
+  const cust = await Customer.findById(req.user.id).select("name phone email kyc address");
   if (!cust) return res.status(404).json({ error: "customer_not_found" });
-  if (!cust.isKycComplete) return res.status(403).json({ error: "kyc_required" });
   try {
     const ids = items.map((x) => x.productId);
     const products = await Product.find({ _id: { $in: ids }, isActive: true });
