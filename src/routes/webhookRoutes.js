@@ -5,45 +5,46 @@ import { createBillFromData } from "../lib/billing.js";
 
 const router = express.Router();
 
-router.post("/razorpay", express.raw({ type: "*/*" }), async (req, res) => {
-  const signature = req.headers["x-razorpay-signature"];
-  const body = req.body;
-  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
-  if (!secret) return res.status(500).json({ error: "missing_webhook_secret" });
-
-  const expected = crypto
-    .createHmac("sha256", secret)
-    .update(req.body)
-    .digest("hex");
-
-  if (expected !== signature) return res.status(400).json({ error: "invalid_signature" });
-
+router.post("/cashfree", express.raw({ type: "application/json" }), async (req, res) => {
   try {
-    const payload = JSON.parse(body.toString());
-    const event = payload?.event;
-    if (event === "order.paid" || event === "payment.captured") {
-      const razorpayOrderId = payload?.payload?.payment?.entity?.order_id || payload?.payload?.order?.entity?.id;
-      if (razorpayOrderId) {
-        const order = await Order.findOne({ razorpayOrderId });
-        if (order && order.paymentStatus !== "PAID") {
-          order.paymentStatus = "PAID";
-          order.status = "CONFIRMED";
-          await order.save();
-          try {
-            await createBillFromData({
-              customerData: { phone: order.customer.phone, name: order.customer.name, email: order.customer.email },
-              items: order.items.map(it => ({ product: it.product, quantity: it.quantity })),
-              paymentType: "RAZORPAY",
-              existingOrderId: order._id
-            });
-          } catch {}
-        }
+    const signature = req.headers["x-webhook-signature"];
+    const body = req.body.toString();
+    
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.CASHFREE_SECRET_KEY)
+      .update(body)
+      .digest("base64");
+    
+    if (expectedSignature !== signature) {
+      return res.status(400).json({ error: "invalid_signature" });
+    }
+
+    const payload = JSON.parse(body);
+    const orderId = payload.data.order.order_id;
+    const orderStatus = payload.data.order.order_status;
+
+    if (orderStatus === "PAID" || orderStatus === "SUCCESS") {
+      const order = await Order.findOne({ cashfreeOrderId: orderId });
+      if (order && order.paymentStatus !== "PAID") {
+        order.paymentStatus = "PAID";
+        order.status = "CONFIRMED";
+        await order.save();
+        try {
+          await createBillFromData({
+            customerData: { phone: order.customer.phone, name: order.customer.name, email: order.customer.email },
+            items: order.items.map(it => ({ product: it.product, quantity: it.quantity })),
+            paymentType: "CASHFREE",
+            existingOrderId: order._id
+          });
+        } catch {}
       }
     }
-  } catch {
-    return res.status(400).json({ error: "invalid_payload" });
+
+    res.status(200).json({ received: true });
+  } catch (err) {
+    console.error("Cashfree webhook error:", err);
+    res.status(400).json({ error: "invalid_payload" });
   }
-  res.json({ received: true });
 });
 
 export default router;

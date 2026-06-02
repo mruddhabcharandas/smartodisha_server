@@ -1,26 +1,50 @@
 import express from "express";
-import razorpay from "../lib/razorpay.js";
+import cashfree from "../lib/cashfree.js";
 import crypto from "crypto";
 
 const router = express.Router();
 
 router.post("/create-order", async (req, res) => {
-  const amountPaise = Number(req.body?.amountPaise || 0);
-  if (!Number.isFinite(amountPaise) || amountPaise <= 0) return res.status(400).json({ error: "invalid_amount" });
+  const amount = Number(req.body?.amount || 0);
+  const orderId = `order_${Date.now()}`;
+  if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: "invalid_amount" });
   try {
-    const order = await razorpay.orders.create({ amount: Math.round(amountPaise), currency: "INR", receipt: `pay_${Date.now()}` });
-    res.json({ id: order.id, amount: order.amount, currency: order.currency });
+    const { data } = await cashfree.post("/pg/orders", {
+      order_id: orderId,
+      order_amount: amount,
+      order_currency: "INR",
+      customer_details: {
+        customer_id: `customer_${Date.now()}`,
+        customer_name: "Customer",
+        customer_email: "customer@example.com",
+        customer_phone: "9999999999"
+      }
+    });
+    res.json({ 
+      orderId: data.order_id, 
+      amount: data.order_amount, 
+      currency: data.order_currency,
+      paymentSessionId: data.payment_session_id
+    });
   } catch (e) {
+    console.error("Cashfree order creation failed:", e.response?.data || e.message);
     res.status(500).json({ error: "payment_create_failed" });
   }
 });
 
 router.post("/verify", async (req, res) => {
-  const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
-  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) return res.status(400).json({ error: "invalid_payload" });
-  const body = razorpay_order_id + "|" + razorpay_payment_id;
-  const expectedSignature = crypto.createHmac("sha256", process.env.RAZORPAY_KEY_SECRET).update(body.toString()).digest("hex");
-  if (expectedSignature === razorpay_signature) return res.json({ success: true });
+  const { orderId, orderAmount, paymentSignature } = req.body || {};
+  if (!orderId || !orderAmount || !paymentSignature) return res.status(400).json({ error: "invalid_payload" });
+  
+  const signatureData = `${orderId}${orderAmount}`;
+  const expectedSignature = crypto
+    .createHmac("sha256", process.env.CASHFREE_SECRET_KEY)
+    .update(signatureData)
+    .digest("base64");
+  
+  if (expectedSignature === paymentSignature) {
+    return res.json({ success: true });
+  }
   return res.status(400).json({ error: "invalid_signature" });
 });
 

@@ -225,4 +225,90 @@ router.post("/customer/login-otp/verify", rateLimit("customer-otp-verify", 5, 60
   });
 });
 
+// GOOGLE OAUTH LOGIN/SIGNUP
+router.post("/customer/google", async (req, res) => {
+  try {
+    const { email, name } = req.body || {};
+    if (!email) return res.status(400).json({ error: "missing_email" });
+
+    // Check if customer exists with this email
+    let customer = await Customer.findOne({ email: email.toLowerCase().trim() });
+
+    if (!customer) {
+      // Need phone number to create new customer
+      return res.status(400).json({ error: "phone_required", email, name });
+    }
+
+    // Existing customer, log them in
+    if (!customer.isActive) return res.status(403).json({ error: "account_pending_approval" });
+
+    const token = jwt.sign(
+      { id: customer._id.toString(), role: "customer", email: customer.email },
+      process.env.JWT_SECRET,
+      { expiresIn: "60m" }
+    );
+
+    res.json({
+      token,
+      user: { id: customer._id.toString(), name: customer.name, email: customer.email, role: "customer", isKycComplete: !!customer.isKycComplete }
+    });
+  } catch (err) {
+    console.error("Google OAuth error:", err);
+    res.status(500).json({ error: "server_error" });
+  }
+});
+
+// GOOGLE OAUTH SIGNUP (with phone)
+router.post("/customer/google/signup", async (req, res) => {
+  try {
+    const { email, name, phone } = req.body || {};
+    if (!email || !phone || !name) return res.status(400).json({ error: "missing_fields" });
+
+    // Check if customer already exists
+    const existingCustomer = await Customer.findOne({ 
+      $or: [{ email: email.toLowerCase().trim() }, { phone }] 
+    });
+    if (existingCustomer) {
+      if (existingCustomer.email === email.toLowerCase().trim()) {
+        // Log them in
+        if (!existingCustomer.isActive) return res.status(403).json({ error: "account_pending_approval" });
+        const token = jwt.sign(
+          { id: existingCustomer._id.toString(), role: "customer", email: existingCustomer.email },
+          process.env.JWT_SECRET,
+          { expiresIn: "60m" }
+        );
+        return res.json({
+          token,
+          user: { id: existingCustomer._id.toString(), name: existingCustomer.name, email: existingCustomer.email, role: "customer", isKycComplete: !!existingCustomer.isKycComplete }
+        });
+      } else {
+        return res.status(400).json({ error: "phone_already_used" });
+      }
+    }
+
+    // Create new customer
+    const customer = await Customer.create({
+      name,
+      email: email.toLowerCase().trim(),
+      phone,
+      isVerified: true,
+      isActive: true
+    });
+
+    const token = jwt.sign(
+      { id: customer._id.toString(), role: "customer", email: customer.email },
+      process.env.JWT_SECRET,
+      { expiresIn: "60m" }
+    );
+
+    res.json({
+      token,
+      user: { id: customer._id.toString(), name: customer.name, email: customer.email, role: "customer", isKycComplete: !!customer.isKycComplete }
+    });
+  } catch (err) {
+    console.error("Google OAuth signup error:", err);
+    res.status(500).json({ error: "server_error" });
+  }
+});
+
 export default router;

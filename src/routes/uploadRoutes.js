@@ -2,25 +2,25 @@ import express from "express";
 import multer from "multer";
 import crypto from "crypto";
 import { auth, requireRole } from "../middleware/auth.js";
-import { configureCloudinary, uploadBuffer } from "../lib/cloudinary.js";
+import { uploadBuffer } from "../lib/s3.js";
 import { Image } from "../models/Image.js";
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
 router.post("/image", auth, requireRole("admin"), upload.single("file"), async (req, res) => {
-  if (!configureCloudinary()) return res.status(503).json({ error: "cloudinary_not_configured" });
+  if (!process.env.AWS_S3_BUCKET_NAME) return res.status(503).json({ error: "s3_not_configured" });
   if (!req.file) return res.status(400).json({ error: "missing_file" });
   try {
     const hash = crypto.createHash("sha256").update(req.file.buffer).digest("hex");
     const existing = await Image.findOne({ hash });
     if (existing) {
-      return res.json({ url: existing.url, publicId: existing.publicId });
+      return res.json({ url: existing.url, key: existing.publicId });
     }
 
     const result = await uploadBuffer(req.file.buffer, "products");
     
-    await Image.create({ hash, url: result.url, publicId: result.publicId });
+    await Image.create({ hash, url: result.url, publicId: result.key });
 
     res.json(result);
   } catch (e) {
@@ -30,4 +30,3 @@ router.post("/image", auth, requireRole("admin"), upload.single("file"), async (
 });
 
 export default router;
-

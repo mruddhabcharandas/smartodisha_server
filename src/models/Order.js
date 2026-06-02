@@ -8,7 +8,7 @@ const orderItemSchema = new mongoose.Schema(
     gst: { type: Number, required: true },
     quantity: { type: Number, required: true },
     lineTotal: { type: Number, required: true },
-    variantSku: { type: String, default: "" }, // Phase 6 requirement
+    variantSku: { type: String, default: "" },
     attributes: { type: Map, of: String },
     image: { type: String, default: "" }
   },
@@ -28,11 +28,11 @@ const orderSchema = new mongoose.Schema(
     totalEstimate: { type: Number, required: true },
     couponCode: { type: String, default: "" },
     couponDiscount: { type: Number, default: 0 },
-    paymentMethod: { type: String, enum: ["CASH", "RAZORPAY", "MANUAL", "COD_20"], default: "CASH" },
+    paymentMethod: { type: String, enum: ["CASH", "CASHFREE", "MANUAL", "COD_20"], default: "CASH" },
     paymentStatus: { type: String, enum: ["PENDING", "PAYMENT_SUBMITTED", "PARTIAL", "PAID", "FAILED", "REFUNDED"], default: "PENDING" },
-    razorpayOrderId: { type: String },
-    razorpayPaymentId: { type: String },
-    razorpaySignature: { type: String },
+    cashfreeOrderId: { type: String },
+    cashfreePaymentId: { type: String },
+    cashfreeSignature: { type: String },
     codAdvancePercent: { type: Number, default: 0 },
     advancePaidAmount: { type: Number, default: 0 },
     codDueAmount: { type: Number, default: 0 },
@@ -49,7 +49,7 @@ const orderSchema = new mongoose.Schema(
     },
     feedbackRating: { type: Number, min: 1, max: 5 },
     shipping: {
-      provider: { type: String },
+      provider: { type: String, default: "SHIPROCKET" },
       waybill: { type: String },
       status: { type: String },
       trackingUrl: { type: String }
@@ -61,15 +61,11 @@ const orderSchema = new mongoose.Schema(
       state: { type: String },
       pincode: { type: String }
     },
-    tracking_id: { type: String, default: "" },
-    awb_number: { type: String, default: "" },
-    lrn: { type: String, default: "" },
-    pickup_id: { type: String, default: "" },
-    pickup_date: { type: String, default: "" },
-    delhivery_job_id: { type: String, default: "" },
+    shiprocketOrderId: { type: String, default: "" },
+    shiprocketShipmentId: { type: String, default: "" },
+    shiprocketAwbNumber: { type: String, default: "" },
     shipment_status: { type: String, default: "" },
-    shipping_charge: { type: Number, default: 0 }
-    ,
+    shipping_charge: { type: Number, default: 0 },
     shipping_discount: { type: Number, default: 0 }
   },
   { timestamps: true }
