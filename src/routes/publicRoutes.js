@@ -157,7 +157,7 @@ router.post("/partner/login", rateLimit("partner-login", 10, 600), async (req, r
     amount: p.amount,
     method: p.method,
     utr: p.utr,
-    razorpayPaymentId: p.razorpayPaymentId,
+    cashfreePaymentId: p.cashfreePaymentId,
     notes: p.notes,
     couponCode: p.couponCode
   }));

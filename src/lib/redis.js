@@ -1,14 +1,17 @@
-import { Redis } from "@upstash/redis";
+import Redis from "ioredis";
 
-const client = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
+const client = new Redis(process.env.REDIS_URL);
 
 const PREFIX = "click2kart";
 
-// Log connection (Upstash REST is stateless, so we just log configuration)
-console.log("🚀 Upstash Redis (REST) Client Initialized");
+// Log connection
+client.on("connect", () => {
+  console.log("🚀 Upstash Redis (TCP) Client Connected");
+});
+
+client.on("error", (err) => {
+  console.error("❌ Redis Connection Error:", err);
+});
 
 /**
  * Get or set cache helper with prefix, logging and metrics
@@ -17,22 +20,26 @@ export const getOrSetCache = async (key, cb, ttl = 3600) => {
   const fullKey = `${PREFIX}:${key}`;
   try {
     const cachedValue = await client.get(fullKey);
-    
+
     if (cachedValue) {
       console.log(`✅ [CACHE HIT]: ${fullKey}`);
       // Tracking Hit Metric
       client.incr(`${PREFIX}:metrics:hits`).catch(() => {});
-      
-      return typeof cachedValue === 'string' ? JSON.parse(cachedValue) : cachedValue;
+
+      try {
+        return JSON.parse(cachedValue);
+      } catch {
+        return cachedValue;
+      }
     }
 
     console.log(`❌ [CACHE MISS]: ${fullKey}`);
     // Tracking Miss Metric
     client.incr(`${PREFIX}:metrics:misses`).catch(() => {});
-    
+
     const freshData = await cb();
     if (freshData !== undefined && freshData !== null) {
-      await client.set(fullKey, JSON.stringify(freshData), { ex: ttl });
+      await client.set(fullKey, JSON.stringify(freshData), "EX", ttl);
     }
     return freshData;
   } catch (error) {
@@ -97,13 +104,17 @@ export const bumpCacheVersion = async (namespace) => {
   }
 };
 
-// No-op for connectRedis as Upstash REST is stateless
+// Connect Redis
 export const connectRedis = async () => {
-  // REST client doesn't need explicit connect
+  // ioredis connects automatically
+  return new Promise((resolve, reject) => {
+    client.once("connect", resolve);
+    client.once("error", reject);
+  });
 };
 
 /**
- * Rate limiting logic using Upstash INCR
+ * Rate limiting logic using Redis INCR
  */
 export const incrRateLimit = async (key) => {
   return await client.incr(key);
@@ -129,7 +140,12 @@ export const getCacheMetrics = async () => {
     return {
       hits: parseInt(hits || 0),
       misses: parseInt(misses || 0),
-      hitRate: hits ? ((parseInt(hits) / (parseInt(hits) + parseInt(misses || 0))) * 100).toFixed(2) + "%" : "0%"
+      hitRate: hits
+        ? (
+            (parseInt(hits) / (parseInt(hits) + parseInt(misses || 0))) *
+            100
+          ).toFixed(2) + "%"
+        : "0%",
     };
   } catch (error) {
     console.error("Error fetching metrics:", error);

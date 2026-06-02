@@ -63,7 +63,7 @@ router.get("/", auth, requireRole("admin"), async (req, res) => {
 // Admin: record a payout against a partner's coupon
 router.post("/:code/payout", auth, requireRole("admin"), async (req, res) => {
   const code = toUpper(req.params.code);
-  const { amount, method, utr, razorpayPaymentId, notes } = req.body || {};
+  const { amount, method, utr, cashfreePaymentId, notes } = req.body || {};
   const numericAmount = Number(amount);
   if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
     return res.status(400).json({ error: "invalid_amount" });
@@ -74,9 +74,9 @@ router.post("/:code/payout", auth, requireRole("admin"), async (req, res) => {
     coupon: coupon._id,
     couponCode: coupon.code,
     amount: numericAmount,
-    method: method === "RAZORPAY" ? "RAZORPAY" : "MANUAL",
+    method: method === "CASHFREE" ? "CASHFREE" : "MANUAL",
     utr: utr || "",
-    razorpayPaymentId: razorpayPaymentId || "",
+    cashfreePaymentId: cashfreePaymentId || "",
     notes: notes || ""
   });
   const summary = await computeSummaryForCoupon(coupon);
@@ -84,4 +84,3 @@ router.post("/:code/payout", auth, requireRole("admin"), async (req, res) => {
 });
 
 export default router;
-
