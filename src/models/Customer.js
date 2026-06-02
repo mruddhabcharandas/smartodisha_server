@@ -12,9 +12,7 @@ const customerSchema = new mongoose.Schema(
     isVerified: { type: Boolean, default: false },
     isActive: { type: Boolean, default: true },
     kyc: {
-      businessName: { type: String, default: "" },
-      gstin: { type: String, default: "" },
-      pan: { type: String, default: "" },
+      fullName: { type: String, default: "" },
       addressLine1: { type: String, default: "" },
       addressLine2: { type: String, default: "" },
       city: { type: String, default: "" },

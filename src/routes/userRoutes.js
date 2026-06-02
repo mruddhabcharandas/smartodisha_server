@@ -36,22 +36,18 @@ router.put("/kyc", auth, requireRole("customer"), async (req, res) => {
   const user = await Customer.findById(req.user.id);
   if (!user) return res.status(404).json({ error: "not_found" });
 
-  const allowed = ["businessName", "gstin", "pan", "addressLine1", "addressLine2", "city", "district", "state", "pincode"];
-  const restricted = ["businessName", "gstin", "pan"];
+  const allowed = ["fullName", "addressLine1", "addressLine2", "city", "district", "state", "pincode"];
   
   const kyc = { ...(user.kyc || {}) };
   
   for (const k of allowed) {
     if (typeof payload[k] === "string") {
       const value = payload[k].trim();
-      // Only allow updating if it was empty or if it's not a restricted field
-      if (!restricted.includes(k) || !kyc[k]) {
-        kyc[k] = value;
-      }
+      kyc[k] = value;
     }
   }
 
-  const requiredFilled = (kyc.businessName && kyc.gstin && kyc.pan && kyc.addressLine1 && kyc.city && kyc.district && kyc.state && kyc.pincode);
+  const requiredFilled = (kyc.fullName && kyc.addressLine1 && kyc.city && kyc.district && kyc.state && kyc.pincode);
   
   user.kyc = kyc;
   user.isKycComplete = !!requiredFilled;
