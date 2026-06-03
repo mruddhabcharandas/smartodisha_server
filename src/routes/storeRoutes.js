@@ -1,11 +1,29 @@
 import express from "express";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
+import mongoose from "mongoose";
 import Store from "../models/Store.js";
 import StoreRequest from "../models/StoreRequest.js";
 import Product from "../models/Product.js";
 import Order from "../models/Order.js";
+import Category from "../models/Category.js";
+import SubCategory from "../models/SubCategory.js";
+import Brand from "../models/Brand.js";
+import AuditLog from "../models/AuditLog.js";
+import StockTxn from "../models/StockTxn.js";
 import { sendEmail } from "../lib/mailer.js";
+import { delCache, bumpCacheVersion } from "../lib/redis.js";
+
+const normalizeSpecifications = (arr) => {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .map((s) => ({
+      key: String(s?.key ?? s?.name ?? "").trim(),
+      value: String(s?.value ?? "").trim()
+    }))
+    .filter((s) => s.key && s.value)
+    .slice(0, 40);
+};
 
 const router = express.Router();
 
@@ -290,6 +308,570 @@ router.get("/dashboard", protect, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch dashboard data" });
+  }
+});
+
+// Store products CRUD
+router.post("/products", protect, async (req, res) => {
+  try {
+    const { name, price, categoryId, subCategoryId, images, stock, weight, gst, description, highlights, specifications, bulkDiscountQuantity, bulkDiscountPriceReduction, mrp, bulkTiers, variants, brandId, minOrderQty, section, hsnCode, sku, packSize } = req.body || {};
+    if (!name || price == null || stock == null || !categoryId) return res.status(400).json({ error: "missing_fields" });
+    
+    if (brandId && !mongoose.isValidObjectId(brandId)) return res.status(400).json({ error: "invalid_brand" });
+    if (!mongoose.isValidObjectId(categoryId)) return res.status(400).json({ error: "invalid_category" });
+    if (subCategoryId && !mongoose.isValidObjectId(subCategoryId)) return res.status(400).json({ error: "invalid_subcategory" });
+
+    const imgArr = Array.isArray(images)
+      ? images.map((i) => (typeof i === "string" ? { url: i } : i)).filter((i) => i && i.url)
+      : [];
+
+    const doc = await Product.create({
+      name: String(name).trim(),
+      description: description || "",
+      price: Number(price),
+      originalStorePrice: Number(price),
+      sku: sku ? String(sku).trim() : undefined,
+      hsnCode: hsnCode ? String(hsnCode).trim() : "",
+      brand: brandId || null,
+      category: categoryId,
+      subCategory: subCategoryId || undefined,
+      images: imgArr,
+      stock: Number(stock),
+      weight: Number(weight || 0),
+      gst: gst == null ? 0 : Number(gst),
+      mrp: mrp == null || mrp === "" ? undefined : Number(mrp),
+      priceTrend: 0, 
+      store: req.store._id,
+      section: section ? String(section).trim() : "",
+      minOrderQty: Number(minOrderQty || 0),
+      packSize: Number(packSize || 1),
+      highlights: Array.isArray(highlights) ? highlights.map(h => String(h || '').trim()).filter(Boolean).slice(0, 12) : [],
+      specifications: normalizeSpecifications(specifications),
+      bulkDiscountQuantity: Number(bulkDiscountQuantity || 0),
+      bulkDiscountPriceReduction: Number(bulkDiscountPriceReduction || 0),
+      bulkTiers: Array.isArray(bulkTiers)
+        ? bulkTiers
+            .map(t => ({ quantity: Number(t?.quantity), priceReduction: Number(t?.priceReduction) }))
+            .filter(t => Number.isFinite(t.quantity) && t.quantity > 0 && Number.isFinite(t.priceReduction) && t.priceReduction >= 0)
+            .sort((a,b) => a.quantity - b.quantity)
+        : [],
+      attributes: Array.isArray(req.body.attributes) ? req.body.attributes.map(a => String(a || '').trim().toLowerCase()).filter(Boolean) : [],
+      variants: Array.isArray(variants) ? variants.map(v => {
+        const variantAttrs = {};
+        if (v.attributes && typeof v.attributes === 'object') {
+          Object.entries(v.attributes).forEach(([key, val]) => {
+            variantAttrs[key.toLowerCase()] = String(val || '').trim();
+          });
+        }
+        return {
+          _id: v._id || new mongoose.Types.ObjectId(),
+          attributes: variantAttrs,
+          price: Number(v?.price ?? price),
+          originalStorePrice: Number(v?.price ?? price),
+          mrp: v?.mrp == null ? undefined : Number(v?.mrp),
+          stock: Number(v?.stock ?? 0),
+          sku: v?.sku ? String(v.sku).trim() : "",
+          weight: Number(v?.weight ?? weight ?? 0),
+          isActive: v?.isActive != null ? !!v.isActive : true,
+          images: Array.isArray(v?.images) ? v.images.map(i => (typeof i === "string" ? { url: i } : i)).filter(i => i && i.url) : []
+        };
+      }) : []
+    });
+
+    try {
+      if ((doc.variants || []).length > 0) {
+        const sum = (doc.variants || []).filter(v => v.isActive !== false).reduce((s, v) => s + Number(v.stock || 0), 0);
+        if (Number.isFinite(sum)) {
+          doc.stock = sum;
+          await doc.save();
+        }
+      }
+    } catch {}
+
+    await bumpCacheVersion("products:grouped");
+    await bumpCacheVersion("products:list");
+    res.status(201).json(doc);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to create product" });
+  }
+});
+
+router.put("/products/:id", protect, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+    
+    const beforeDoc = await Product.findById(req.params.id);
+    if (!beforeDoc) return res.status(404).json({ error: "not_found" });
+    if (beforeDoc.store?.toString() !== req.store._id.toString()) {
+      return res.status(403).json({ error: "forbidden" });
+    }
+
+    const allowed = ["name", "description", "highlights", "specifications", "price", "categoryId", "subCategoryId", "images", "stock", "weight", "gst", "mrp", "isActive", "bulkDiscountQuantity", "bulkDiscountPriceReduction", "bulkTiers", "variants", "brandId", "minOrderQty", "section", "hsnCode", "sku", "packSize"];
+    const payload = {};
+    for (const k of allowed) if (k in req.body) payload[k] = req.body[k];
+    if (payload.packSize !== undefined) payload.packSize = Number(payload.packSize || 1);
+
+    if (payload.brandId) {
+      if (!mongoose.isValidObjectId(payload.brandId)) return res.status(400).json({ error: "invalid_brand" });
+      payload.brand = payload.brandId;
+      delete payload.brandId;
+    }
+    if (payload.categoryId) {
+      if (!mongoose.isValidObjectId(payload.categoryId)) return res.status(400).json({ error: "invalid_category" });
+      payload.category = payload.categoryId;
+      delete payload.categoryId;
+    }
+    if (payload.subCategoryId !== undefined) {
+      if (payload.subCategoryId === null || payload.subCategoryId === "") {
+        payload.subCategory = null;
+      } else {
+        if (!mongoose.isValidObjectId(payload.subCategoryId)) return res.status(400).json({ error: "invalid_subcategory" });
+        payload.subCategory = payload.subCategoryId;
+      }
+      delete payload.subCategoryId;
+    }
+    if (Array.isArray(payload.images)) payload.images = payload.images.map((i) => (typeof i === "string" ? { url: i } : i)).filter((i) => i && i.url);
+    if (Array.isArray(payload.highlights)) {
+      payload.highlights = payload.highlights.map(h => String(h || '').trim()).filter(Boolean).slice(0, 12);
+    }
+    if (Array.isArray(payload.specifications)) {
+      payload.specifications = normalizeSpecifications(payload.specifications);
+    }
+    if (Array.isArray(payload.bulkTiers)) {
+      payload.bulkTiers = payload.bulkTiers
+        .map(t => ({ quantity: Number(t?.quantity), priceReduction: Number(t?.priceReduction) }))
+        .filter(t => Number.isFinite(t.quantity) && t.quantity > 0 && Number.isFinite(t.priceReduction) && t.priceReduction >= 0)
+        .sort((a,b) => a.quantity - b.quantity);
+    }
+    if (Array.isArray(payload.attributes)) {
+      payload.attributes = payload.attributes.map(a => String(a || '').trim().toLowerCase()).filter(Boolean);
+    }
+
+    if (payload.price !== undefined) {
+      payload.originalStorePrice = Number(payload.price);
+    }
+
+    if (Array.isArray(payload.variants) && payload.variants.length > 0) {
+      payload.variants = payload.variants.map(v => {
+        const variantAttrs = {};
+        if (v.attributes && typeof v.attributes === 'object') {
+          Object.entries(v.attributes).forEach(([key, val]) => {
+            variantAttrs[key.toLowerCase()] = String(val || '').trim();
+          });
+        }
+        let existingStock = 0;
+        if (v._id && beforeDoc && beforeDoc.variants) {
+          const existing = beforeDoc.variants.find(ex => ex._id.toString() === v._id.toString());
+          if (existing) existingStock = existing.stock || 0;
+        }
+        return {
+          _id: v._id || new mongoose.Types.ObjectId(),
+          attributes: variantAttrs,
+          price: Number(v?.price ?? 0),
+          originalStorePrice: Number(v?.price ?? 0),
+          mrp: v?.mrp == null ? undefined : Number(v?.mrp),
+          stock: v.stock != null ? Number(v.stock) : existingStock,
+          sku: v?.sku ? String(v.sku).trim() : "",
+          weight: Number(v?.weight ?? 0),
+          isActive: v?.isActive != null ? !!v.isActive : true,
+          images: Array.isArray(v?.images) ? v.images.map(i => (typeof i === "string" ? { url: i } : i)).filter(i => i && i.url) : []
+        };
+      });
+      const sum = payload.variants.filter(v => v.isActive !== false).reduce((s, v) => s + Number(v.stock || 0), 0);
+      payload.stock = Number.isFinite(sum) ? sum : 0;
+    } else if (Array.isArray(payload.variants) && payload.variants.length === 0) {
+      delete payload.variants;
+    } else {
+      if (!("stock" in req.body) && beforeDoc) {
+        payload.stock = beforeDoc.stock;
+      }
+    }
+
+    if (payload.price != null && beforeDoc) {
+      const newPrice = Number(payload.price);
+      const oldPrice = Number(beforeDoc.price);
+      const mrp = payload.mrp != null ? Number(payload.mrp) : (beforeDoc.mrp ? Number(beforeDoc.mrp) : newPrice);
+      if (newPrice > mrp) {
+        return res.status(400).json({ error: "price_cannot_exceed_mrp" });
+      }
+      payload.priceTrend = newPrice > oldPrice ? 1 : 0;
+    }
+
+    const updated = await Product.findByIdAndUpdate(req.params.id, payload, { new: true });
+    
+    try {
+      const changes = {};
+      if (beforeDoc) {
+        if (payload.price != null && Number(beforeDoc.price) !== Number(payload.price)) changes.price = { before: beforeDoc.price, after: payload.price };
+        if (payload.gst != null && Number(beforeDoc.gst) !== Number(payload.gst)) changes.gst = { before: beforeDoc.gst, after: payload.gst };
+        if (payload.minOrderQty != null && Number(beforeDoc.minOrderQty) !== Number(payload.minOrderQty)) changes.minOrderQty = { before: beforeDoc.minOrderQty, after: payload.minOrderQty };
+        if (Array.isArray(payload.bulkTiers)) changes.bulkTiers = { before: beforeDoc.bulkTiers, after: payload.bulkTiers };
+      }
+      if (Object.keys(changes).length) {
+        await AuditLog.create({
+          actorId: req.store?._id || "",
+          actorRole: "store",
+          type: "PRODUCT_UPDATE",
+          entityType: "PRODUCT",
+          entityId: updated._id.toString(),
+          before: changes,
+          after: null,
+          note: "Product updated by store"
+        });
+      }
+    } catch {}
+
+    await bumpCacheVersion("products:grouped");
+    await bumpCacheVersion("products:list");
+    res.json(updated);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update product" });
+  }
+});
+
+router.delete("/products/:id", protect, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+    
+    const product = await Product.findById(req.params.id);
+    if (!product) return res.status(404).json({ error: "not_found" });
+    if (product.store?.toString() !== req.store._id.toString()) {
+      return res.status(403).json({ error: "forbidden" });
+    }
+
+    product.isActive = false;
+    await product.save();
+    
+    await bumpCacheVersion("products:grouped");
+    await bumpCacheVersion("products:list");
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to delete product" });
+  }
+});
+
+router.patch("/products/:id/stock", protect, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+    const qty = Number(req.body?.quantity);
+    if (!Number.isInteger(qty) || qty <= 0) return res.status(400).json({ error: "invalid_quantity" });
+    
+    const doc = await Product.findById(req.params.id);
+    if (!doc || !doc.isActive) return res.status(404).json({ error: "not_found" });
+    if (doc.store?.toString() !== req.store._id.toString()) return res.status(403).json({ error: "forbidden" });
+
+    if (doc.stock - qty < 0) return res.status(400).json({ error: "insufficient_stock" });
+    const before = doc.stock;
+    doc.stock -= qty;
+    await doc.save();
+    
+    await StockTxn.create({ 
+      product: doc._id, 
+      type: req.body?.reason === "ADJUST" ? "ADJUST" : "SOLD", 
+      quantity: qty, 
+      before, 
+      after: doc.stock, 
+      refType: "MANUAL", 
+      note: req.body?.note || "" 
+    });
+    
+    res.json({ id: doc._id.toString(), stock: doc.stock });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to adjust stock" });
+  }
+});
+
+// Store variants CRUD
+router.post("/products/:id/variants", protect, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+    const p = await Product.findById(req.params.id);
+    if (!p || !p.isActive) return res.status(404).json({ error: "not_found" });
+    if (p.store?.toString() !== req.store._id.toString()) return res.status(403).json({ error: "forbidden" });
+    
+    const v = req.body || {};
+    const sku = v?.sku ? String(v.sku).trim() : undefined;
+    if (sku) {
+      const conflict = await Product.findOne({ "variants.sku": sku });
+      if (conflict) return res.status(400).json({ error: "sku_exists" });
+    }
+    const attrs = new Map();
+    if (v?.attributes && typeof v.attributes === 'object') {
+      Object.entries(v.attributes).forEach(([key, val]) => {
+        if (key && val) attrs.set(key.toLowerCase().trim(), String(val).trim());
+      });
+    }
+    
+    const duplicate = (p.variants || []).find(x => {
+      const xAttrs = x.attributes instanceof Map ? Object.fromEntries(x.attributes) : (x.attributes || {});
+      const keys = Array.from(attrs.keys());
+      const xKeys = Object.keys(xAttrs);
+      if (keys.length !== xKeys.length) return false;
+      return keys.every(k => String(xAttrs[k] || '').toLowerCase() === String(attrs.get(k) || '').toLowerCase());
+    });
+    if (duplicate) return res.status(400).json({ error: "duplicate_variant" });
+    
+    const newVar = {
+      _id: new mongoose.Types.ObjectId(),
+      attributes: attrs,
+      price: Number(v?.price ?? p.price ?? 0),
+      originalStorePrice: Number(v?.price ?? p.price ?? 0),
+      mrp: v?.mrp == null ? undefined : Number(v?.mrp),
+      stock: Number(v?.stock ?? 0),
+      sku,
+      weight: Number(v?.weight ?? p.weight ?? 0),
+      isActive: v?.isActive != null ? !!v.isActive : true,
+      images: Array.isArray(v?.images) ? v.images.map(i => (typeof i === "string" ? { url: i } : i)).filter(i => i && i.url) : []
+    };
+    
+    p.variants.push(newVar);
+    p.markModified("variants");
+    await p.save();
+    
+    try {
+      const sum = (p.variants || []).filter(v => v.isActive !== false).reduce((s, v) => s + Number(v.stock || 0), 0);
+      p.stock = Number.isFinite(sum) ? sum : 0;
+      await p.save();
+    } catch {}
+    
+    await bumpCacheVersion("products:grouped");
+    await bumpCacheVersion("products:list");
+    res.status(201).json(newVar);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to add variant" });
+  }
+});
+
+router.put("/products/:id/variants/:vid", protect, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+    const p = await Product.findById(req.params.id);
+    if (!p || !p.isActive) return res.status(404).json({ error: "not_found" });
+    if (p.store?.toString() !== req.store._id.toString()) return res.status(403).json({ error: "forbidden" });
+    
+    const idx = (p.variants || []).findIndex(v => v._id.toString() === req.params.vid);
+    if (idx === -1) return res.status(404).json({ error: "variant_not_found" });
+    const v = p.variants[idx];
+    const payload = req.body || {};
+    
+    if (payload.sku !== undefined) {
+      const sku = String(payload.sku || "").trim();
+      if (sku) {
+        const conflict = await Product.findOne({ 
+          $or: [
+            { sku: sku, _id: { $ne: p._id } },
+            { "variants.sku": sku, _id: { $ne: p._id } },
+            { _id: p._id, "variants.sku": sku, "variants._id": { $ne: new mongoose.Types.ObjectId(req.params.vid) } }
+          ]
+        });
+        if (conflict) return res.status(400).json({ error: "sku_exists" });
+      }
+      v.sku = sku;
+    }
+    if (payload.attributes) {
+      const attrs = new Map();
+      if (payload.attributes && typeof payload.attributes === 'object') {
+        Object.entries(payload.attributes).forEach(([key, val]) => {
+          if (key && val) attrs.set(key.toLowerCase().trim(), String(val).trim());
+        });
+      }
+      const duplicate = (p.variants || []).find((x, i) => {
+        if (i === idx) return false;
+        const xAttrs = x.attributes instanceof Map ? Object.fromEntries(x.attributes) : (x.attributes || {});
+        const keys = Array.from(attrs.keys());
+        const xKeys = Object.keys(xAttrs);
+        if (keys.length !== xKeys.length) return false;
+        return keys.every(k => String(xAttrs[k] || '').toLowerCase() === String(attrs.get(k) || '').toLowerCase());
+      });
+      if (duplicate) return res.status(400).json({ error: "duplicate_variant" });
+      v.attributes = attrs;
+    }
+    if (payload.weight != null) v.weight = Number(payload.weight);
+    if (payload.price != null) {
+      v.price = Number(payload.price);
+      v.originalStorePrice = Number(payload.price);
+    }
+    if (payload.mrp != null) v.mrp = Number(payload.mrp);
+    if (payload.stock != null) {
+      const qty = Number(payload.stock);
+      const before = v.stock;
+      v.stock = qty;
+      p.stock = (p.variants || []).filter(vx => vx.isActive !== false).reduce((s, vx) => s + (vx.stock || 0), 0);
+      await p.save();
+      await StockTxn.create({ product: p._id, type: "ADJUST", quantity: qty, before, after: qty, variantSku: v.sku });
+    }
+    if (payload.isActive != null) {
+      v.isActive = !!payload.isActive;
+      p.stock = (p.variants || []).filter(vx => vx.isActive !== false).reduce((s, vx) => s + (vx.stock || 0), 0);
+    }
+    if (Array.isArray(payload.images)) v.images = payload.images.map(i => (typeof i === "string" ? { url: i } : i)).filter(i => i && i.url);
+    p.markModified("variants");
+    await p.save();
+    
+    try {
+      const sum = (p.variants || []).filter(x => x.isActive !== false).reduce((s, x) => s + Number(x.stock || 0), 0);
+      p.stock = Number.isFinite(sum) ? sum : 0;
+      await p.save();
+    } catch {}
+    
+    await bumpCacheVersion("products:grouped");
+    await bumpCacheVersion("products:list");
+    res.json(v);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update variant" });
+  }
+});
+
+router.delete("/products/:id/variants/:vid", protect, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+    const p = await Product.findById(req.params.id);
+    if (!p || !p.isActive) return res.status(404).json({ error: "not_found" });
+    if (p.store?.toString() !== req.store._id.toString()) return res.status(403).json({ error: "forbidden" });
+    
+    const initialCount = p.variants?.length || 0;
+    p.variants = (p.variants || []).filter(v => v._id.toString() !== req.params.vid);
+    
+    if (p.variants.length === initialCount) return res.status(404).json({ error: "variant_not_found" });
+    
+    p.markModified("variants");
+    await p.save();
+    
+    try {
+      const sum = (p.variants || []).filter(x => x.isActive !== false).reduce((s, x) => s + Number(x.stock || 0), 0);
+      p.stock = Number.isFinite(sum) ? sum : 0;
+      await p.save();
+    } catch {}
+    
+    await bumpCacheVersion("products:grouped");
+    await bumpCacheVersion("products:list");
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to delete variant" });
+  }
+});
+
+router.patch("/products/:id/variants/:vid/stock", protect, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+    const qty = Number(req.body?.quantity);
+    if (!Number.isInteger(qty) || qty <= 0) return res.status(400).json({ error: "invalid_quantity" });
+    const p = await Product.findById(req.params.id);
+    if (!p || !p.isActive) return res.status(404).json({ error: "not_found" });
+    if (p.store?.toString() !== req.store._id.toString()) return res.status(403).json({ error: "forbidden" });
+    
+    const idx = (p.variants || []).findIndex(v => v._id.toString() === req.params.vid);
+    if (idx === -1) return res.status(404).json({ error: "variant_not_found" });
+    const v = p.variants[idx];
+    if ((v.stock || 0) - qty < 0) return res.status(400).json({ error: "insufficient_stock" });
+    const before = v.stock || 0;
+    v.stock = before - qty;
+    p.markModified("variants");
+    await p.save();
+    try {
+      const sum = (p.variants || []).filter(x => x.isActive !== false).reduce((s, x) => s + Number(x.stock || 0), 0);
+      p.stock = Number.isFinite(sum) ? sum : 0;
+      await p.save();
+    } catch {}
+    await StockTxn.create({ product: p._id, type: req.body?.reason === "ADJUST" ? "ADJUST" : "SOLD", quantity: qty, before, after: v.stock, refType: "MANUAL", note: req.body?.note || "", variantSku: v.sku });
+    res.json({ id: v._id.toString(), stock: v.stock });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to adjust variant stock" });
+  }
+});
+
+router.get("/products/:id/stock-history", protect, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+    const p = await Product.findById(req.params.id);
+    if (!p) return res.status(404).json({ error: "not_found" });
+    if (p.store?.toString() !== req.store._id.toString()) return res.status(403).json({ error: "forbidden" });
+    
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const items = await StockTxn.find({ product: req.params.id }).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit);
+    res.json({ page, limit, count: items.length, items });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch stock history" });
+  }
+});
+
+// Store categories/brands creation helper
+router.post("/categories", protect, async (req, res) => {
+  try {
+    const { name, slug, brandId, image, description, attributes } = req.body || {};
+    if (!name || !slug) return res.status(400).json({ error: "missing_fields" });
+    
+    if (brandId && !mongoose.isValidObjectId(brandId)) return res.status(400).json({ error: "invalid_brand" });
+    
+    const filter = { $or: [{ name: name.toLowerCase() }, { slug: slug.toLowerCase() }] };
+    if (brandId) filter.brand = brandId;
+    else filter.brand = null;
+
+    const exists = await Category.findOne(filter);
+    if (exists) return res.status(409).json({ error: "duplicate_category" });
+    
+    const payload = {
+      name: name.toLowerCase(),
+      slug: slug.toLowerCase(),
+      brand: brandId || null,
+      image: image || "",
+      description: description || "",
+      attributes: Array.isArray(attributes) ? attributes.map(a => a.toLowerCase().trim()) : []
+    };
+    const doc = await Category.create(payload);
+    await delCache("categories:all");
+    await bumpCacheVersion("products:grouped");
+    await bumpCacheVersion("products:list");
+    res.status(201).json(doc);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to create category" });
+  }
+});
+
+router.post("/subcategories", protect, async (req, res) => {
+  try {
+    const { name, slug, categoryId } = req.body || {};
+    if (!name || !slug || !categoryId) return res.status(400).json({ error: "missing_fields" });
+    if (!mongoose.isValidObjectId(categoryId)) return res.status(400).json({ error: "invalid_category" });
+    
+    const exists = await SubCategory.findOne({ $or: [{ name }, { slug }], category: categoryId });
+    if (exists) return res.status(409).json({ error: "duplicate_subcategory" });
+    
+    const doc = await SubCategory.create({ name, slug, category: categoryId });
+    res.status(201).json(doc);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to create subcategory" });
+  }
+});
+
+router.post("/brands", protect, async (req, res) => {
+  try {
+    const { name, slug, logo } = req.body || {};
+    if (!name || !slug) return res.status(400).json({ error: "missing_fields" });
+    
+    const exists = await Brand.findOne({ $or: [{ name }, { slug }] });
+    if (exists) return res.status(409).json({ error: "duplicate_brand" });
+    
+    const doc = await Brand.create({ name, slug, logo });
+    await delCache("brands:all");
+    await bumpCacheVersion("products:grouped");
+    await bumpCacheVersion("products:list");
+    res.status(201).json(doc);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to create brand" });
   }
 });
 
