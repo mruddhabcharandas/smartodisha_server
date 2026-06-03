@@ -123,10 +123,39 @@ router.post("/addresses/:id/set-default", auth, requireRole("customer"), async (
   res.json(user.savedAddresses);
 });
 
+router.put("/change-password", auth, requireRole("customer"), async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body || {};
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: "missing_fields" });
+    }
+
+    const user = await Customer.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: "not found" });
+
+    const isPasswordValid = await user.comparePassword(currentPassword);
+    if (!isPasswordValid) {
+      return res.status(401).json({ error: "invalid_current_password" });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: "password_too_short" });
+    }
+
+    user.password = newPassword;
+    await user.save();
+
+    res.json({ message: "password_updated" });
+  } catch (err) {
+    console.error("Change password error:", err);
+    res.status(500).json({ error: "server_error" });
+  }
+});
+
 router.put("/kyc", auth, requireRole("customer"), async (req, res) => {
   const payload = req.body || {};
   const user = await Customer.findById(req.user.id);
-  if (!user) return res.status(404).json({ error: "not_found" });
+  if (!user) return res.status(404).json({ error: "not found" });
 
   const allowed = ["fullName", "addressLine1", "addressLine2", "city", "district", "state", "pincode"];
   
