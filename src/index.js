@@ -34,7 +34,6 @@ import brandRoutes from "./routes/brandRoutes.js";
 import subCategoryRoutes from "./routes/subCategoryRoutes.js";
 import wishlistRoutes from "./routes/wishlistRoutes.js";
 import supportTicketRoutes from "./routes/supportTicketRoutes.js";
-import storeRoutes from "./routes/storeRoutes.js";
 
 dotenv.config();
 
@@ -76,7 +75,6 @@ app.use("/api/shipping", shippingRoutes);
 app.use("/", sitemapRoutes);
 app.use("/api/recommendations", recommendationRoutes);
 app.use("/api/inventory", inventoryRoutes);
-app.use("/api/stores", storeRoutes);
 app.use("/api/payment", paymentRoutes);
 app.use("/api/offers", offerRoutes);
 app.use("/api/brands", brandRoutes);
@@ -126,4 +124,3 @@ const start = async () => {
 start();
 
 export default app;
-
