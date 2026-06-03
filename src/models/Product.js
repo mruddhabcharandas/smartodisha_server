@@ -11,11 +11,13 @@ const productSchema = new mongoose.Schema(
     slug: { type: String, trim: true, unique: true, sparse: true },
     description: { type: String, default: "" },
     price: { type: Number, required: true, min: 0 },
+    originalStorePrice: { type: Number, min: 0 }, // Original price set by store (before markup)
     sku: { type: String, trim: true, index: true }, // Top-level SKU for simple products
     hsnCode: { type: String, default: "" },
     brand: { type: mongoose.Schema.Types.ObjectId, ref: "Brand", default: null, index: true },
     category: { type: mongoose.Schema.Types.ObjectId, ref: "Category", required: true, index: true },
     subCategory: { type: mongoose.Schema.Types.ObjectId, ref: "SubCategory", index: true },
+    store: { type: mongoose.Schema.Types.ObjectId, ref: "Store", default: null, index: true },
     images: { type: [imageSchema], default: [] },
     stock: { type: Number, required: true, min: 0 },
     weight: { type: Number, default: 0, min: 0 }, // weight in grams
@@ -38,6 +40,7 @@ const productSchema = new mongoose.Schema(
           _id: { type: mongoose.Schema.Types.ObjectId, default: () => new mongoose.Types.ObjectId() },
           attributes: { type: Map, of: String }, // Flexible map for dynamic attributes
           price: { type: Number, min: 0 },
+          originalStorePrice: { type: Number, min: 0 }, // Original variant price from store
           mrp: { type: Number, min: 0 },
           stock: { type: Number, min: 0, default: 0 },
           sku: { type: String },

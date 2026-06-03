@@ -33,6 +33,8 @@ import offerRoutes from "./routes/offerRoutes.js";
 import brandRoutes from "./routes/brandRoutes.js";
 import subCategoryRoutes from "./routes/subCategoryRoutes.js";
 import wishlistRoutes from "./routes/wishlistRoutes.js";
+import supportTicketRoutes from "./routes/supportTicketRoutes.js";
+import storeRoutes from "./routes/storeRoutes.js";
 
 dotenv.config();
 
@@ -80,6 +82,8 @@ app.use("/api/offers", offerRoutes);
 app.use("/api/brands", brandRoutes);
 app.use("/api/subcategories", subCategoryRoutes);
 app.use("/api/wishlist", wishlistRoutes);
+app.use("/api/support-tickets", supportTicketRoutes);
+app.use("/api/stores", storeRoutes);
 
 const PORT = process.env.PORT || 5000;
 

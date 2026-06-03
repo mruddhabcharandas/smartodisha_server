@@ -279,13 +279,10 @@ router.post("/", auth, requireRole("customer"), async (req, res) => {
 
 // Prepare Payment - new flow
 router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) => {
-  const { items, paymentMethod, couponCode } = req.body || {};
+  const { items, paymentMethod, couponCode, deliveryAddress } = req.body || {};
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "no_items" });
-  if (paymentMethod !== "CASHFREE") return res.status(400).json({ error: "invalid_payment_method" });
+  if (!["CASHFREE", "COD"].includes(paymentMethod)) return res.status(400).json({ error: "invalid_payment_method" });
   try {
-    if (!process.env.CASHFREE_APP_ID || !process.env.CASHFREE_SECRET_KEY) {
-      return res.status(500).json({ error: "cashfree_not_configured" });
-    }
     const uniqueIds = [...new Set(items.map((x) => x.productId))];
     const products = await Product.find({ _id: { $in: uniqueIds }, isActive: true });
     if (products.length !== uniqueIds.length) return res.status(400).json({ error: "product_not_found" });
@@ -295,19 +292,59 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
 
     const { finalAmount: payableTotal } = await validateAndApplyCoupon(couponCode, totals.total);
 
-    const { data } = await cashfree.post("/pg/orders", {
-      order_id: `prepay_${Date.now()}`,
-      order_amount: payableTotal,
-      order_currency: "INR",
-      customer_details: {
-        customer_id: `customer_${req.user.id}`,
-        customer_name: "Customer",
-        customer_email: "customer@example.com",
-        customer_phone: "9999999999"
+    if (paymentMethod === "COD") {
+      // COD requires 25% advance
+      const advanceAmount = Math.round(payableTotal * 0.25 * 100) / 100;
+      const codDueAmount = Math.round(payableTotal * 0.75 * 100) / 100;
+      
+      if (!process.env.CASHFREE_APP_ID || !process.env.CASHFREE_SECRET_KEY) {
+        return res.status(500).json({ error: "cashfree_not_configured" });
       }
-    });
-    const checksum = crypto.createHash("sha256").update(JSON.stringify({ items, paymentMethod, amount: payableTotal })).digest("hex");
-    return res.json({ cashfreeOrderId: data.order_id, paymentSessionId: data.payment_session_id, amount: payableTotal, checksum });
+      
+      const { data } = await cashfree.post("/pg/orders", {
+        order_id: `cod_prepay_${Date.now()}`,
+        order_amount: advanceAmount,
+        order_currency: "INR",
+        customer_details: {
+          customer_id: `customer_${req.user.id}`,
+          customer_name: "Customer",
+          customer_email: "customer@example.com",
+          customer_phone: "9999999999"
+        }
+      });
+      
+      return res.json({
+        cashfreeOrderId: data.order_id,
+        paymentSessionId: data.payment_session_id,
+        amount: advanceAmount,
+        totalAmount: payableTotal,
+        codDueAmount,
+        paymentMethod: "COD"
+      });
+    } else {
+      if (!process.env.CASHFREE_APP_ID || !process.env.CASHFREE_SECRET_KEY) {
+        return res.status(500).json({ error: "cashfree_not_configured" });
+      }
+      
+      const { data } = await cashfree.post("/pg/orders", {
+        order_id: `prepay_${Date.now()}`,
+        order_amount: payableTotal,
+        order_currency: "INR",
+        customer_details: {
+          customer_id: `customer_${req.user.id}`,
+          customer_name: "Customer",
+          customer_email: "customer@example.com",
+          customer_phone: "9999999999"
+        }
+      });
+      
+      return res.json({
+        cashfreeOrderId: data.order_id,
+        paymentSessionId: data.payment_session_id,
+        amount: payableTotal,
+        paymentMethod: "CASHFREE"
+      });
+    }
   } catch (e) {
     console.error("Prepare payment failed:", e.response?.data || e.message || e);
     return res.status(500).json({ error: "payment_initiation_failed" });
@@ -316,8 +353,8 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
 
 // Create Order after payment verification (new flow)
 router.post("/create-after-verify", auth, requireRole("customer"), async (req, res) => {
-  const { cashfreeOrderId, cashfreePaymentId, cashfreeSignature, items, paymentMethod, notes, couponCode } = req.body || {};
-  if (paymentMethod !== "CASHFREE") return res.status(400).json({ error: "invalid_payment_method" });
+  const { cashfreeOrderId, cashfreePaymentId, cashfreeSignature, items, paymentMethod, notes, couponCode, deliveryAddress, totalAmount, codDueAmount } = req.body || {};
+  if (!["CASHFREE", "COD"].includes(paymentMethod)) return res.status(400).json({ error: "invalid_payment_method" });
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "no_items" });
 
   const exists = await Order.findOne({ cashfreePaymentId: cashfreePaymentId });
@@ -362,25 +399,35 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
       };
     });
 
+    // Use provided delivery address or fall back to customer's address
+    const shippingAddress = deliveryAddress ? {
+      line1: deliveryAddress.addressLine1,
+      line2: deliveryAddress.addressLine2 || "",
+      city: deliveryAddress.city,
+      state: deliveryAddress.state,
+      pincode: deliveryAddress.pincode
+    } : {
+      line1: cust.kyc?.addressLine1 || cust.address || "",
+      line2: cust.kyc?.addressLine2 || "",
+      city: cust.kyc?.city || "",
+      state: cust.kyc?.state || "",
+      pincode: cust.kyc?.pincode || ""
+    };
+
     const doc = await Order.create({
       customer: { name: cust.name, phone: cust.phone, email: cust.email || "" },
-      shippingAddress: {
-        line1: cust.kyc?.addressLine1 || cust.address || "",
-        line2: cust.kyc?.addressLine2 || "",
-        city: cust.kyc?.city || "",
-        state: cust.kyc?.state || "",
-        pincode: cust.kyc?.pincode || ""
-      },
+      shippingAddress,
       items: orderItems,
-      totalEstimate: payableTotal,
+      totalEstimate: paymentMethod === "COD" ? (totalAmount || payableTotal) : payableTotal,
       couponCode: couponCode?.toUpperCase() || "",
       couponDiscount: coupDiscount,
       status: "CONFIRMED",
-      paymentMethod: "CASHFREE",
+      paymentMethod,
       paymentStatus: "PAID",
       cashfreeOrderId,
       cashfreePaymentId,
       cashfreeSignature,
+      codDueAmount: paymentMethod === "COD" ? (codDueAmount || Math.round((totalAmount || payableTotal) * 0.75 * 100) / 100) : 0,
       notes: notes || ""
     });
 
@@ -419,7 +466,7 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
           variantSku: it.variantSku ? String(it.variantSku) : undefined,
           quantity: it.quantity
         })),
-        paymentType: "CASHFREE",
+        paymentType: paymentMethod,
         existingOrderId: doc._id
       });
     } catch {}
@@ -427,16 +474,19 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
     try {
       const to = cust.email || process.env.MAIL_TO || process.env.COMPANY_EMAIL || process.env.MAIL_FROM;
       const html = renderMail({
-        heading: "Payment Confirmed",
-        subheading: "We’ve confirmed your payment and are preparing your shipment.",
+        heading: paymentMethod === "COD" ? "Order Confirmed (COD)" : "Payment Confirmed",
+        subheading: paymentMethod === "COD" 
+          ? "Your COD order has been confirmed. 25% advance received." 
+          : "We’ve confirmed your payment and are preparing your shipment.",
         highlight: `Order ID: ${doc._id}`,
         blocks: [
-          { label: "Payment Method", value: "CASHFREE" },
-          { label: "Amount Paid", value: `₹${Number(doc.totalEstimate).toLocaleString("en-IN")}` },
+          { label: "Payment Method", value: paymentMethod },
+          { label: "Amount Paid", value: `₹${Number(paymentMethod === "COD" ? Math.round((totalAmount || payableTotal) * 0.25 * 100) / 100 : doc.totalEstimate).toLocaleString("en-IN")}` },
+          ...(paymentMethod === "COD" ? [{ label: "COD Due Amount", value: `₹${Number(doc.codDueAmount).toLocaleString("en-IN")}` }] : []),
           { label: "Current Status", value: doc.status }
         ]
       });
-      if (to) await sendEmail({ to, subject: `Payment confirmed - ${process.env.COMPANY_NAME || "SmartOdisha"}`, html });
+      if (to) await sendEmail({ to, subject: `Order confirmed - ${process.env.COMPANY_NAME || "SmartOdisha"}`, html });
     } catch {}
 
     try { await tryCreateShiprocketShipment(doc); } catch {}
