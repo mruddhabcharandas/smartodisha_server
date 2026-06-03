@@ -3,11 +3,174 @@ import { auth, requireRole, requirePermission } from "../middleware/auth.js";
 import Product from "../models/Product.js";
 import Customer from "../models/Customer.js";
 import Bill from "../models/Bill.js";
+import Store from "../models/Store.js";
 import { sendEmail } from "../lib/mailer.js";
+import { bumpCacheVersion } from "../lib/redis.js";
 
 import Admin from "../models/Admin.js";
 
 const router = express.Router();
+
+// Store Admin Routes
+// Get all stores
+router.get("/stores", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const stores = await Store.find().sort({ createdAt: -1 }).select("-password");
+    res.json(stores);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch stores" });
+  }
+});
+
+// Get single store by ID
+router.get("/stores/:id", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const store = await Store.findById(req.params.id).select("-password");
+    if (!store) {
+      return res.status(404).json({ error: "Store not found" });
+    }
+    res.json(store);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch store" });
+  }
+});
+
+// Create new store
+router.post("/stores", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const {
+      name,
+      email,
+      password,
+      phone,
+      address,
+      gstNumber,
+      image,
+      storePercentage,
+      adminCutPercentage,
+      isActive
+    } = req.body;
+
+    // Validate required fields
+    if (!name || !email || !password || !phone) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    // Check if store exists with same email
+    const existingStore = await Store.findOne({ email });
+    if (existingStore) {
+      return res.status(400).json({ error: "Store with this email already exists" });
+    }
+
+    const store = await Store.create({
+      name,
+      email,
+      password,
+      phone,
+      address,
+      gstNumber,
+      image,
+      storePercentage,
+      adminCutPercentage,
+      isActive
+    });
+
+    // Send email to store owner
+    try {
+      await sendEmail({
+        to: store.email,
+        subject: `Welcome to ${process.env.COMPANY_NAME || "SmartOdisha"}!`,
+        html: `
+          <div style="font-family: ui-sans-serif, system-ui; max-width: 560px; margin: auto; padding: 24px; border: 1px solid #eee; border-radius: 12px;">
+            <h2 style="color:#111827;margin:0 0 12px;font-weight:800">Welcome, ${store.name}!</h2>
+            <p style="color:#374151;line-height:1.6">Your store account has been created. You can now sign in to manage your products and view orders.</p>
+            <p style="color:#6b7280;margin-top:16px;font-size:14px">Email: ${store.email}<br>Password: ${password}</p>
+            <a href="${process.env.CLIENT_URL || "http://localhost:5173"}/business/login" style="display:inline-block;margin-top:16px;padding:12px 16px;background:#2563eb;color:#fff;text-decoration:none;border-radius:10px;font-weight:700">Login Now</a>
+            <p style="color:#6b7280;margin-top:24px;font-size:12px">&copy; ${new Date().getFullYear()} ${process.env.COMPANY_NAME || "SmartOdisha"}</p>
+          </div>
+        `
+      });
+    } catch (err) {
+      console.error("Failed to send welcome email to store:", err);
+    }
+
+    // Invalidate store cache
+    await bumpCacheVersion("stores");
+
+    const storeObj = store.toObject();
+    delete storeObj.password;
+    res.status(201).json(storeObj);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to create store" });
+  }
+});
+
+// Update store
+router.put("/stores/:id", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const store = await Store.findById(req.params.id);
+    if (!store) {
+      return res.status(404).json({ error: "Store not found" });
+    }
+
+    const {
+      name,
+      email,
+      password,
+      phone,
+      address,
+      gstNumber,
+      image,
+      storePercentage,
+      adminCutPercentage,
+      isActive
+    } = req.body;
+
+    if (name) store.name = name;
+    if (email) store.email = email;
+    if (password) store.password = password;
+    if (phone) store.phone = phone;
+    if (address) store.address = address;
+    if (gstNumber !== undefined) store.gstNumber = gstNumber;
+    if (image !== undefined) store.image = image;
+    if (storePercentage !== undefined) store.storePercentage = storePercentage;
+    if (adminCutPercentage !== undefined) store.adminCutPercentage = adminCutPercentage;
+    if (isActive !== undefined) store.isActive = isActive;
+
+    await store.save();
+
+    // Invalidate store cache
+    await bumpCacheVersion("stores");
+
+    const storeObj = store.toObject();
+    delete storeObj.password;
+    res.json(storeObj);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update store" });
+  }
+});
+
+// Delete store
+router.delete("/stores/:id", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const store = await Store.findByIdAndDelete(req.params.id);
+    if (!store) {
+      return res.status(404).json({ error: "Store not found" });
+    }
+
+    // Invalidate store cache
+    await bumpCacheVersion("stores");
+
+    res.json({ deleted: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to delete store" });
+  }
+});
 
 // Get all staff members
 router.get("/staff", auth, requireRole("admin"), async (req, res) => {

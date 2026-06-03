@@ -1,6 +1,11 @@
 import mongoose from "mongoose";
 import bcrypt from "bcrypt";
 
+const imageSchema = new mongoose.Schema({
+  url: { type: String, required: true },
+  publicId: { type: String }
+});
+
 const storeSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, unique: true, trim: true },
@@ -15,9 +20,9 @@ const storeSchema = new mongoose.Schema(
       pincode: { type: String, default: "" }
     },
     gstNumber: { type: String, default: "" },
+    image: { type: imageSchema, default: null },
     storePercentage: { type: Number, default: 0, min: 0 }, // Store's markup percentage
     adminCutPercentage: { type: Number, default: 5, min: 0 }, // Admin's percentage cut
-    sections: { type: [String], default: [] },
     isActive: { type: Boolean, default: true },
     isVerified: { type: Boolean, default: true },
     resetPasswordToken: { type: String },
