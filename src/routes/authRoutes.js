@@ -136,7 +136,7 @@ router.post("/customer/login", rateLimit("customer-login", 10, 600), async (req,
   const token = jwt.sign(
     { id: user._id.toString(), role: "customer", email: user.email },
     process.env.JWT_SECRET,
-    { expiresIn: "60m" }
+    { expiresIn: "365d" }
   );
 
   res.json({
@@ -226,7 +226,7 @@ router.post("/customer/login-otp/verify", rateLimit("customer-otp-verify", 5, 60
   const token = jwt.sign(
     { id: user._id.toString(), role: "customer", email: user.email },
     process.env.JWT_SECRET,
-    { expiresIn: "60m" }
+    { expiresIn: "365d" }
   );
   res.json({
     token,
@@ -260,7 +260,7 @@ router.post("/customer/google", async (req, res) => {
     const token = jwt.sign(
       { id: customer._id.toString(), role: "customer", email: customer.email },
       process.env.JWT_SECRET,
-      { expiresIn: "60m" }
+      { expiresIn: "365d" }
     );
 
     res.json({
@@ -300,7 +300,7 @@ router.post("/customer/google/signup", async (req, res) => {
         const token = jwt.sign(
           { id: existingCustomer._id.toString(), role: "customer", email: existingCustomer.email },
           process.env.JWT_SECRET,
-          { expiresIn: "60m" }
+          { expiresIn: "365d" }
         );
         return res.json({
           token,
@@ -324,7 +324,7 @@ router.post("/customer/google/signup", async (req, res) => {
     const token = jwt.sign(
       { id: customer._id.toString(), role: "customer", email: customer.email },
       process.env.JWT_SECRET,
-      { expiresIn: "60m" }
+      { expiresIn: "365d" }
     );
 
     res.json({
