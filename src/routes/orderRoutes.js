@@ -204,15 +204,27 @@ router.post("/", auth, requireRole("customer"), async (req, res) => {
 
   let cashfreeOrder = null;
   try {
+    let phoneVal = cust.phone;
+    const defaultAddr = (cust.savedAddresses || []).find(a => a.isDefault);
+    if (defaultAddr && defaultAddr.phone) {
+      phoneVal = defaultAddr.phone;
+    }
+    let cleanPhone = String(phoneVal || "").replace(/\D/g, "");
+    if (cleanPhone.length > 10) cleanPhone = cleanPhone.slice(-10);
+    if (cleanPhone.length !== 10) cleanPhone = String(cust.phone || "").replace(/\D/g, "").slice(-10);
+    if (cleanPhone.length !== 10) cleanPhone = "9999999999";
+    const emailVal = cust.email || "customer@example.com";
+    const nameVal = (defaultAddr && defaultAddr.fullName) || cust.name || "Customer";
+
     const { data } = await cashfree.post("/pg/orders", {
       order_id: `order_${Date.now()}`,
       order_amount: payableTotal,
       order_currency: "INR",
       customer_details: {
         customer_id: `customer_${cust._id.toString()}`,
-        customer_name: cust.name,
-        customer_email: cust.email || "customer@example.com",
-        customer_phone: cust.phone
+        customer_name: nameVal,
+        customer_email: emailVal,
+        customer_phone: cleanPhone
       }
     });
     cashfreeOrder = data;
@@ -283,6 +295,28 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "no_items" });
   if (!["CASHFREE", "COD"].includes(paymentMethod)) return res.status(400).json({ error: "invalid_payment_method" });
   try {
+    const cust = await Customer.findById(req.user.id).select("name phone email savedAddresses");
+    if (!cust) return res.status(404).json({ error: "customer_not_found" });
+
+    let phoneVal = cust.phone;
+    const defaultAddr = (cust.savedAddresses || []).find(a => a.isDefault);
+    if (defaultAddr && defaultAddr.phone) {
+      phoneVal = defaultAddr.phone;
+    }
+    let cleanPhone = String(phoneVal || "").replace(/\D/g, "");
+    if (cleanPhone.length > 10) {
+      cleanPhone = cleanPhone.slice(-10);
+    }
+    if (cleanPhone.length !== 10) {
+      cleanPhone = String(cust.phone || "").replace(/\D/g, "").slice(-10);
+    }
+    if (cleanPhone.length !== 10) {
+      cleanPhone = "9999999999";
+    }
+
+    const emailVal = cust.email || "customer@example.com";
+    const nameVal = (defaultAddr && defaultAddr.fullName) || cust.name || "Customer";
+
     const uniqueIds = [...new Set(items.map((x) => x.productId))];
     const products = await Product.find({ _id: { $in: uniqueIds }, isActive: true });
     if (products.length !== uniqueIds.length) return res.status(400).json({ error: "product_not_found" });
@@ -291,6 +325,10 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
     if (totals.total < minAmount) return res.status(400).json({ error: "min_order_not_met", minAmount });
 
     const { finalAmount: payableTotal } = await validateAndApplyCoupon(couponCode, totals.total);
+
+    const appId = process.env.CASHFREE_APP_ID || "";
+    const isSandbox = appId.toUpperCase().startsWith("TEST");
+    const cashfreeMode = isSandbox ? "sandbox" : "production";
 
     if (paymentMethod === "COD") {
       // COD requires 25% advance
@@ -306,10 +344,10 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
         order_amount: advanceAmount,
         order_currency: "INR",
         customer_details: {
-          customer_id: `customer_${req.user.id}`,
-          customer_name: "Customer",
-          customer_email: "customer@example.com",
-          customer_phone: "9999999999"
+          customer_id: `customer_${cust._id.toString()}`,
+          customer_name: nameVal,
+          customer_email: emailVal,
+          customer_phone: cleanPhone
         }
       });
       
@@ -320,7 +358,7 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
         totalAmount: payableTotal,
         codDueAmount,
         paymentMethod: "COD",
-        cashfreeMode: process.env.NODE_ENV === "production" ? "production" : "sandbox"
+        cashfreeMode
       });
     } else {
       if (!process.env.CASHFREE_APP_ID || !process.env.CASHFREE_SECRET_KEY) {
@@ -332,10 +370,10 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
         order_amount: payableTotal,
         order_currency: "INR",
         customer_details: {
-          customer_id: `customer_${req.user.id}`,
-          customer_name: "Customer",
-          customer_email: "customer@example.com",
-          customer_phone: "9999999999"
+          customer_id: `customer_${cust._id.toString()}`,
+          customer_name: nameVal,
+          customer_email: emailVal,
+          customer_phone: cleanPhone
         }
       });
       
@@ -344,7 +382,7 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
         paymentSessionId: data.payment_session_id,
         amount: payableTotal,
         paymentMethod: "CASHFREE",
-        cashfreeMode: process.env.NODE_ENV === "production" ? "production" : "sandbox"
+        cashfreeMode
       });
     }
   } catch (e) {

@@ -4,8 +4,9 @@ const cashfree = axios.create();
 
 // Use request interceptor to evaluate environment variables at request-time instead of import-time
 cashfree.interceptors.request.use((config) => {
-  const isProduction = process.env.NODE_ENV === "production";
-  config.baseURL = isProduction ? "https://api.cashfree.com" : "https://sandbox.cashfree.com";
+  const appId = process.env.CASHFREE_APP_ID || "";
+  const isSandbox = appId.toUpperCase().startsWith("TEST");
+  config.baseURL = isSandbox ? "https://sandbox.cashfree.com" : "https://api.cashfree.com";
   
   config.headers["x-api-version"] = "2022-09-01";
   config.headers["x-client-id"] = process.env.CASHFREE_APP_ID;
