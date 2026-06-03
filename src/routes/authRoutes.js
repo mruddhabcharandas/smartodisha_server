@@ -116,7 +116,7 @@ router.post("/customer/verify-otp", async (req, res) => {
 
   res.json({
     token,
-    user: { id: customer._id.toString(), name: customer.name, email: customer.email, role: "customer", isKycComplete: !!customer.isKycComplete }
+    user: { id: customer._id.toString(), name: customer.name, email: customer.email, avatar: customer.avatar || "", role: "customer", isKycComplete: !!customer.isKycComplete }
   });
 });
 
