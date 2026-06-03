@@ -44,7 +44,7 @@ router.post("/login", rateLimit("admin-login", 5, 900), async (req, res) => {
       permissions: admin.permissions || []
     },
     process.env.JWT_SECRET,
-    { expiresIn: "12h" }
+    { expiresIn: "720h" } // 30 days
   );
   res.json({
     token,
@@ -111,7 +111,7 @@ router.post("/customer/verify-otp", async (req, res) => {
   const token = jwt.sign(
     { id: customer._id.toString(), role: "customer", email: customer.email },
     process.env.JWT_SECRET,
-    { expiresIn: "60m" }
+    { expiresIn: "168h" } // 7 days
   );
 
   res.json({
