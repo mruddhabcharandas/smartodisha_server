@@ -237,6 +237,19 @@ router.get("/products", protect, async (req, res) => {
   }
 });
 
+// Get single product for store
+router.get("/products/:id", protect, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+    const product = await Product.findOne({ _id: req.params.id, store: req.store._id });
+    if (!product) return res.status(404).json({ error: "Product not found" });
+    res.json(product);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch product" });
+  }
+});
+
 // Get store orders
 router.get("/orders", protect, async (req, res) => {
   try {

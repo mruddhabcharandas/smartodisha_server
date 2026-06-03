@@ -24,7 +24,8 @@ router.post("/create-order", async (req, res) => {
       orderId: data.order_id, 
       amount: data.order_amount, 
       currency: data.order_currency,
-      paymentSessionId: data.payment_session_id
+      paymentSessionId: data.payment_session_id,
+      cashfreeMode: process.env.NODE_ENV === "production" ? "production" : "sandbox"
     });
   } catch (e) {
     console.error("Cashfree order creation failed:", e.response?.data || e.message);

@@ -319,7 +319,8 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
         amount: advanceAmount,
         totalAmount: payableTotal,
         codDueAmount,
-        paymentMethod: "COD"
+        paymentMethod: "COD",
+        cashfreeMode: process.env.NODE_ENV === "production" ? "production" : "sandbox"
       });
     } else {
       if (!process.env.CASHFREE_APP_ID || !process.env.CASHFREE_SECRET_KEY) {
@@ -342,7 +343,8 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
         cashfreeOrderId: data.order_id,
         paymentSessionId: data.payment_session_id,
         amount: payableTotal,
-        paymentMethod: "CASHFREE"
+        paymentMethod: "CASHFREE",
+        cashfreeMode: process.env.NODE_ENV === "production" ? "production" : "sandbox"
       });
     }
   } catch (e) {
