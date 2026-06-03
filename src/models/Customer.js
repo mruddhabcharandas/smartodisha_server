@@ -1,14 +1,27 @@
 import mongoose from "mongoose";
 import bcrypt from "bcrypt";
 
+const addressSchema = new mongoose.Schema({
+  fullName: { type: String, required: true },
+  phone: { type: String, required: true },
+  addressLine1: { type: String, required: true },
+  addressLine2: { type: String, default: "" },
+  city: { type: String, required: true },
+  district: { type: String, default: "" },
+  state: { type: String, required: true },
+  pincode: { type: String, required: true },
+  isDefault: { type: Boolean, default: false }
+});
+
 const customerSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
     phone: { type: String, required: true, trim: true, unique: true },
     email: { type: String, unique: true, lowercase: true, trim: true, sparse: true },
     password: { type: String, minlength: 6 },
-    address: { type: String, default: "" },
+    address: { type: String, default: "" }, // For backward compatibility
     avatar: { type: String, default: "" },
+    savedAddresses: [addressSchema],
     purchaseHistory: [{ type: mongoose.Schema.Types.ObjectId, ref: "Bill" }],
     isVerified: { type: Boolean, default: false },
     isActive: { type: Boolean, default: true },

@@ -17,7 +17,7 @@ router.get("/me", auth, async (req, res) => {
     });
   }
 
-  const user = await Customer.findById(req.user.id).select("name email phone address avatar isKycComplete kyc");
+  const user = await Customer.findById(req.user.id).select("name email phone address avatar isKycComplete kyc savedAddresses");
   if (!user) return res.status(404).json({ error: "not found" });
   res.json({
     id: user._id.toString(),
@@ -28,6 +28,7 @@ router.get("/me", auth, async (req, res) => {
     avatar: user.avatar || "",
     isKycComplete: !!user.isKycComplete,
     kyc: user.kyc || {},
+    savedAddresses: user.savedAddresses || [],
     role: "customer"
   });
 });
@@ -40,9 +41,6 @@ router.put("/profile", auth, requireRole("customer"), async (req, res) => {
   if (typeof payload.name === "string" && payload.name.trim()) {
     user.name = payload.name.trim();
   }
-  if (typeof payload.address === "string") {
-    user.address = payload.address.trim();
-  }
   if (typeof payload.avatar === "string") {
     user.avatar = payload.avatar.trim();
   }
@@ -51,9 +49,78 @@ router.put("/profile", auth, requireRole("customer"), async (req, res) => {
 
   res.json({
     name: user.name,
-    address: user.address,
     avatar: user.avatar
   });
+});
+
+// Saved Addresses endpoints
+router.get("/addresses", auth, requireRole("customer"), async (req, res) => {
+  const user = await Customer.findById(req.user.id).select("savedAddresses");
+  if (!user) return res.status(404).json({ error: "not found" });
+  res.json(user.savedAddresses || []);
+});
+
+router.post("/addresses", auth, requireRole("customer"), async (req, res) => {
+  const user = await Customer.findById(req.user.id);
+  if (!user) return res.status(404).json({ error: "not found" });
+  
+  const address = req.body;
+  const isFirstAddress = user.savedAddresses.length === 0;
+  if (isFirstAddress) {
+    address.isDefault = true;
+  } else if (address.isDefault) {
+    // Unset other default addresses
+    user.savedAddresses.forEach(addr => addr.isDefault = false);
+  }
+  
+  user.savedAddresses.push(address);
+  await user.save();
+  res.json(user.savedAddresses[user.savedAddresses.length - 1]);
+});
+
+router.put("/addresses/:id", auth, requireRole("customer"), async (req, res) => {
+  const user = await Customer.findById(req.user.id);
+  if (!user) return res.status(404).json({ error: "not found" });
+  
+  const addressId = req.params.id;
+  const address = user.savedAddresses.id(addressId);
+  
+  if (!address) return res.status(404).json({ error: "address not found" });
+  
+  const updates = req.body;
+  
+  if (updates.isDefault) {
+    user.savedAddresses.forEach(addr => addr.isDefault = false);
+  }
+  
+  Object.assign(address, updates);
+  await user.save();
+  res.json(address);
+});
+
+router.delete("/addresses/:id", auth, requireRole("customer"), async (req, res) => {
+  const user = await Customer.findById(req.user.id);
+  if (!user) return res.status(404).json({ error: "not found" });
+  
+  const addressId = req.params.id;
+  user.savedAddresses.pull(addressId);
+  
+  await user.save();
+  res.json({ message: "address deleted" });
+});
+
+router.post("/addresses/:id/set-default", auth, requireRole("customer"), async (req, res) => {
+  const user = await Customer.findById(req.user.id);
+  if (!user) return res.status(404).json({ error: "not found" });
+  
+  const addressId = req.params.id;
+  
+  user.savedAddresses.forEach(addr => {
+    addr.isDefault = addr._id.toString() === addressId;
+  });
+  
+  await user.save();
+  res.json(user.savedAddresses);
 });
 
 router.put("/kyc", auth, requireRole("customer"), async (req, res) => {

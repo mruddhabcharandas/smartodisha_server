@@ -237,7 +237,7 @@ router.post("/customer/login-otp/verify", rateLimit("customer-otp-verify", 5, 60
 // GOOGLE OAUTH LOGIN/SIGNUP
 router.post("/customer/google", async (req, res) => {
   try {
-    const { email, name } = req.body || {};
+    const { email, name, avatar } = req.body || {};
     if (!email) return res.status(400).json({ error: "missing_email" });
 
     // Check if customer exists with this email
@@ -245,7 +245,13 @@ router.post("/customer/google", async (req, res) => {
 
     if (!customer) {
       // Need phone number to create new customer
-      return res.status(400).json({ error: "phone_required", email, name });
+      return res.status(400).json({ error: "phone_required", email, name, avatar });
+    }
+
+    // Update avatar if provided
+    if (avatar && avatar.trim()) {
+      customer.avatar = avatar.trim();
+      await customer.save();
     }
 
     // Existing customer, log them in
@@ -259,7 +265,7 @@ router.post("/customer/google", async (req, res) => {
 
     res.json({
       token,
-      user: { id: customer._id.toString(), name: customer.name, email: customer.email, role: "customer", isKycComplete: !!customer.isKycComplete }
+      user: { id: customer._id.toString(), name: customer.name, email: customer.email, avatar: customer.avatar, role: "customer", isKycComplete: !!customer.isKycComplete }
     });
   } catch (err) {
     console.error("Google OAuth error:", err);
@@ -270,7 +276,7 @@ router.post("/customer/google", async (req, res) => {
 // GOOGLE OAUTH SIGNUP (with phone)
 router.post("/customer/google/signup", async (req, res) => {
   try {
-    const { email, name, phone } = req.body || {};
+    const { email, name, phone, avatar } = req.body || {};
     if (!email || !phone || !name) return res.status(400).json({ error: "missing_fields" });
     
     // Clean and validate phone number
@@ -283,6 +289,12 @@ router.post("/customer/google/signup", async (req, res) => {
     });
     if (existingCustomer) {
       if (existingCustomer.email === email.toLowerCase().trim()) {
+        // Update avatar if provided
+        if (avatar && avatar.trim()) {
+          existingCustomer.avatar = avatar.trim();
+          await existingCustomer.save();
+        }
+        
         // Log them in
         if (!existingCustomer.isActive) return res.status(403).json({ error: "account_pending_approval" });
         const token = jwt.sign(
@@ -292,7 +304,7 @@ router.post("/customer/google/signup", async (req, res) => {
         );
         return res.json({
           token,
-          user: { id: existingCustomer._id.toString(), name: existingCustomer.name, email: existingCustomer.email, role: "customer", isKycComplete: !!existingCustomer.isKycComplete }
+          user: { id: existingCustomer._id.toString(), name: existingCustomer.name, email: existingCustomer.email, avatar: existingCustomer.avatar, role: "customer", isKycComplete: !!existingCustomer.isKycComplete }
         });
       } else {
         return res.status(400).json({ error: "phone_already_used" });
@@ -304,6 +316,7 @@ router.post("/customer/google/signup", async (req, res) => {
       name,
       email: email.toLowerCase().trim(),
       phone: cleanedPhone,
+      avatar: avatar && avatar.trim() ? avatar.trim() : undefined,
       isVerified: true,
       isActive: true
     });
@@ -316,7 +329,7 @@ router.post("/customer/google/signup", async (req, res) => {
 
     res.json({
       token,
-      user: { id: customer._id.toString(), name: customer.name, email: customer.email, role: "customer", isKycComplete: !!customer.isKycComplete }
+      user: { id: customer._id.toString(), name: customer.name, email: customer.email, avatar: customer.avatar, role: "customer", isKycComplete: !!customer.isKycComplete }
     });
   } catch (err) {
     console.error("Google OAuth signup error:", err);
