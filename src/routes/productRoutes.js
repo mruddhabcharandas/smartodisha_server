@@ -1,6 +1,7 @@
 import express from "express";
 import mongoose from "mongoose";
 import Product from "../models/Product.js";
+import Store from "../models/Store.js";
 import AuditLog from "../models/AuditLog.js";
 import Category from "../models/Category.js";
 import { auth, requireRole, requirePermission } from "../middleware/auth.js";
@@ -142,7 +143,24 @@ router.get("/", async (req, res) => {
     if (brand && mongoose.isValidObjectId(brand)) query.brand = brand;
     if (category && mongoose.isValidObjectId(category)) query.category = category;
     if (subCategory && mongoose.isValidObjectId(subCategory)) query.subCategory = subCategory;
-    if (store) query.store = store.toString().trim();
+    
+    // Handle store query parameter: if it's a valid ObjectId, use it directly; otherwise, try to find store by name
+    if (store) {
+      if (mongoose.isValidObjectId(store)) {
+        query.store = store;
+      } else {
+        // Try to find store by name
+        const foundStore = await Store.findOne({ name: { $regex: new RegExp(`^${store}$`, 'i') } });
+        if (foundStore) {
+          query.store = foundStore._id;
+        } else {
+          // If no store found, use the string as is (in case store field is stored as string)
+          // Or set to null to avoid error
+          query.store = null;
+        }
+      }
+    }
+    
     if (section) query.section = section.toString().trim();
     
     const searchStr = q ? String(q).trim() : "";
@@ -170,7 +188,8 @@ router.get("/", async (req, res) => {
     let cursor = Product.find(query)
       .populate("brand", "name")
       .populate("category", "name")
-      .populate("subCategory", "name");
+      .populate("subCategory", "name")
+      .populate("store", "name address phone pincode city");
     
     if (useText) {
       cursor = cursor.select({ score: { $meta: "textScore" } }).sort({ score: { $meta: "textScore" }, createdAt: -1 });
@@ -247,6 +266,7 @@ router.get("/:idOrSlug", async (req, res) => {
   await item.populate("brand", "name");
   await item.populate("category", "name");
   await item.populate("subCategory", "name");
+  await item.populate("store", "name address phone pincode city");
   
   if (!item.isActive) return res.status(404).json({ error: "not_found" });
   const canViewPrice = isViewerAuthorized(req);

@@ -18,6 +18,7 @@ const productSchema = new mongoose.Schema(
     category: { type: mongoose.Schema.Types.ObjectId, ref: "Category", required: true, index: true },
     subCategory: { type: mongoose.Schema.Types.ObjectId, ref: "SubCategory", index: true },
     store: { type: mongoose.Schema.Types.ObjectId, ref: "Store", default: null, index: true },
+    storeName: { type: String, default: "", index: true },
     images: { type: [imageSchema], default: [] },
     stock: { type: Number, required: true, min: 0 },
     weight: { type: Number, default: 0, min: 0 }, // weight in grams
