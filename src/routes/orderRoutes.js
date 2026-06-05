@@ -331,9 +331,9 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
     const cashfreeMode = isSandbox ? "sandbox" : "production";
 
     if (paymentMethod === "COD") {
-      // COD requires 25% advance
-      const advanceAmount = Math.round(payableTotal * 0.25 * 100) / 100;
-      const codDueAmount = Math.round(payableTotal * 0.75 * 100) / 100;
+      // COD requires 15% advance
+      const advanceAmount = Math.round(payableTotal * 0.15 * 100) / 100;
+      const codDueAmount = Math.round(payableTotal * 0.85 * 100) / 100;
       
       if (!process.env.CASHFREE_APP_ID || !process.env.CASHFREE_SECRET_KEY) {
         return res.status(500).json({ error: "cashfree_not_configured" });
@@ -467,7 +467,7 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
       cashfreeOrderId,
       cashfreePaymentId,
       cashfreeSignature,
-      codDueAmount: paymentMethod === "COD" ? (codDueAmount || Math.round((totalAmount || payableTotal) * 0.75 * 100) / 100) : 0,
+      codDueAmount: paymentMethod === "COD" ? (codDueAmount || Math.round((totalAmount || payableTotal) * 0.85 * 100) / 100) : 0,
       notes: notes || ""
     });
 
@@ -516,12 +516,12 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
       const html = renderMail({
         heading: paymentMethod === "COD" ? "Order Confirmed (COD)" : "Payment Confirmed",
         subheading: paymentMethod === "COD" 
-          ? "Your COD order has been confirmed. 25% advance received." 
+          ? "Your COD order has been confirmed. 15% advance received." 
           : "We’ve confirmed your payment and are preparing your shipment.",
         highlight: `Order ID: ${doc._id}`,
         blocks: [
           { label: "Payment Method", value: paymentMethod },
-          { label: "Amount Paid", value: `₹${Number(paymentMethod === "COD" ? Math.round((totalAmount || payableTotal) * 0.25 * 100) / 100 : doc.totalEstimate).toLocaleString("en-IN")}` },
+          { label: "Amount Paid", value: `₹${Number(paymentMethod === "COD" ? Math.round((totalAmount || payableTotal) * 0.15 * 100) / 100 : doc.totalEstimate).toLocaleString("en-IN")}` },
           ...(paymentMethod === "COD" ? [{ label: "COD Due Amount", value: `₹${Number(doc.codDueAmount).toLocaleString("en-IN")}` }] : []),
           { label: "Current Status", value: doc.status }
         ]
