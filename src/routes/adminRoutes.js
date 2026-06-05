@@ -1,4 +1,5 @@
 import express from "express";
+import mongoose from "mongoose";
 import { auth, requireRole, requirePermission } from "../middleware/auth.js";
 import Product from "../models/Product.js";
 import Customer from "../models/Customer.js";
@@ -486,9 +487,7 @@ router.get("/revenue/summary", auth, requireRole("admin"), async (req, res) => {
 // SKU Breakdown for a specific Product
 router.get("/revenue/product/:id/skus", auth, requireRole("admin"), async (req, res) => {
   const Order = (await import("../models/Order.js")).default;
-  // Wait we need to import mongoose here? Let's add it at the top!
-  // For now, just skip the check for now, let's fix that later
-  // if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
   
   try {
     const skuAgg = await Order.aggregate([
