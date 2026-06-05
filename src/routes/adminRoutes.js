@@ -260,11 +260,12 @@ router.get("/stats", auth, async (req, res) => {
     }
   ]);
 
-  const [actualProductsCount, totalCustomers, pendingCustomers, totalBills, lowStockProducts, newOrders, pendingCash] = await Promise.all([
+  const [actualProductsCount, totalCustomers, pendingCustomers, totalBills, totalSellers, lowStockProducts, newOrders, pendingCash] = await Promise.all([
     Product.countDocuments({ isActive: true }),
     Customer.countDocuments({ isActive: true }),
     Customer.countDocuments({ isActive: false }),
     Bill.countDocuments({}),
+    Store.countDocuments({}), // Add total sellers count
     Product.find({ 
       isActive: true, 
       $or: [
@@ -317,6 +318,7 @@ router.get("/stats", auth, async (req, res) => {
     totalCustomers, 
     pendingCustomers, 
     totalBills, 
+    totalSellers, // Add to response
     lowStock: lowStock.sort((a, b) => a.stock - b.stock).slice(0, 10), 
     newOrders, 
     pendingCash 
