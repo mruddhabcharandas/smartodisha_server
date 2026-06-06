@@ -170,7 +170,8 @@ router.post("/calculate", async (req, res) => {
     const isFree = order_amount >= freeDeliveryAbove && payment_method === "prepaid";
     const discount = isFree ? amt : 0;
     let final = isFree ? 0 : amt;
-    const codCharge = Math.round((order_amount * 0.15) * 100) / 100;
+    // COD charge: 2% of order amount, minimum ₹20, maximum ₹100
+    const codCharge = Math.max(20, Math.min(100, Math.round((order_amount * 0.02) * 100) / 100));
     if (payment_method === "cod") {
       final = amt + codCharge;
     }
@@ -202,7 +203,8 @@ router.post("/calculate", async (req, res) => {
     const isFree = order_amount >= freeDeliveryAbove && payment_method === "prepaid";
     const discount = isFree ? amt : 0;
     let final = isFree ? 0 : amt;
-    const codCharge = Math.round((order_amount * 0.15) * 100) / 100;
+    // COD charge: 2% of order amount, minimum ₹20, maximum ₹100
+    const codCharge = Math.max(20, Math.min(100, Math.round((order_amount * 0.02) * 100) / 100));
     if (payment_method === "cod") {
       final = amt + codCharge;
     }
