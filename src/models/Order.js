@@ -23,8 +23,11 @@ const orderSchema = new mongoose.Schema(
       alternatePhone: { type: String, default: "" },
       email: { type: String, default: "" }
     },
+    store: { type: mongoose.Schema.Types.ObjectId, ref: "Store", required: true }, // Added store reference
     items: { type: [orderItemSchema], required: true },
     totalEstimate: { type: Number, required: true },
+    storeRevenue: { type: Number, default: 0 }, // Store's revenue after admin cut
+    adminRevenue: { type: Number, default: 0 }, // Admin's cut
     couponCode: { type: String, default: "" },
     couponDiscount: { type: Number, default: 0 },
     paymentMethod: { type: String, enum: ["CASHFREE", "MANUAL", "COD"], default: "CASHFREE" },

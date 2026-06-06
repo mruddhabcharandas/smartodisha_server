@@ -280,34 +280,9 @@ router.get("/products/:id", protect, async (req, res) => {
 // Get store orders
 router.get("/orders", protect, async (req, res) => {
   try {
-    // Find orders that have products from this store
-    const orders = await Order.find({
-      "items.product": {
-        $in: await Product.find({ store: req.store._id }).distinct("_id")
-      }
-    }).sort({ createdAt: -1 });
-
-    // Calculate store-specific revenue
-    const ordersWithRevenue = orders.map(order => {
-      const itemsFromStore = order.items.filter(item => {
-        // We need to check if this item is from our store
-        return true; // For now, assume all items in orders are relevant, we'll refine this later
-      });
-
-      let storeRevenue = 0;
-      itemsFromStore.forEach(item => {
-        const storePrice = item.originalStorePrice || item.price;
-        const adminCut = (storePrice * req.store.adminCutPercentage) / 100;
-        storeRevenue += (storePrice - adminCut) * item.quantity;
-      });
-
-      return {
-        ...order.toObject(),
-        storeRevenue
-      };
-    });
-
-    res.json(ordersWithRevenue);
+    // Now we can just find orders where store matches
+    const orders = await Order.find({ store: req.store._id }).sort({ createdAt: -1 });
+    res.json(orders);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch orders" });
@@ -322,27 +297,19 @@ router.get("/dashboard", protect, async (req, res) => {
     const outOfStock = await Product.countDocuments({ store: req.store._id, stock: 0 });
 
     // Get recent orders
-    const recentOrders = await Order.find({
-      "items.product": {
-        $in: await Product.find({ store: req.store._id }).distinct("_id")
-      }
-    }).sort({ createdAt: -1 }).limit(10);
+    const recentOrders = await Order.find({ store: req.store._id }).sort({ createdAt: -1 }).limit(10);
 
     // Calculate total revenue
-    let totalRevenue = 0;
-    for (const order of recentOrders) {
-      for (const item of order.items) {
-        const storePrice = item.originalStorePrice || item.price;
-        const adminCut = (storePrice * req.store.adminCutPercentage) / 100;
-        totalRevenue += (storePrice - adminCut) * item.quantity;
-      }
-    }
+    const totalRevenue = await Order.aggregate([
+      { $match: { store: req.store._id } },
+      { $group: { _id: null, total: { $sum: "$storeRevenue" } } }
+    ]);
 
     res.json({
       totalProducts,
       activeProducts,
       outOfStock,
-      totalRevenue,
+      totalRevenue: totalRevenue[0]?.total || 0,
       recentOrders
     });
   } catch (err) {

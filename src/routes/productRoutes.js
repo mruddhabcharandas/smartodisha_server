@@ -189,7 +189,7 @@ router.get("/", async (req, res) => {
       .populate("brand", "name")
       .populate("category", "name")
       .populate("subCategory", "name")
-      .populate("store", "name address phone pincode city");
+      .populate("store", "name address phone pincode city storePercentage adminCutPercentage");
     
     if (useText) {
       cursor = cursor.select({ score: { $meta: "textScore" } }).sort({ score: { $meta: "textScore" }, createdAt: -1 });
@@ -266,7 +266,7 @@ router.get("/:idOrSlug", async (req, res) => {
   await item.populate("brand", "name");
   await item.populate("category", "name");
   await item.populate("subCategory", "name");
-  await item.populate("store", "name address phone pincode city pickupAddress pickupName pickupPhone");
+  await item.populate("store", "name address phone pincode city pickupAddress pickupName pickupPhone storePercentage adminCutPercentage");
   
   if (!item.isActive) return res.status(404).json({ error: "not_found" });
   const canViewPrice = isViewerAuthorized(req);

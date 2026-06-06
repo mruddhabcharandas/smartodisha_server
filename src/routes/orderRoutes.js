@@ -5,7 +5,11 @@ import Order from "../models/Order.js";
 import Product from "../models/Product.js";
 import Customer from "../models/Customer.js";
 import Coupon from "../models/Coupon.js";
+import Store from "../models/Store.js";
 import { auth, requireRole, requirePermission } from "../middleware/auth.js";
+import StockTxn from "../models/StockTxn.js";
+import Bill from "../models/Bill.js";
+import Review from "../models/Review.js";
 import { computeTotals } from "../lib/invoice.js";
 import cashfree from "../lib/cashfree.js";
 import crypto from "crypto";
@@ -405,8 +409,25 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
 
   try {
     const uniqueIds = [...new Set(items.map((x) => x.productId))];
-    const products = await Product.find({ _id: { $in: uniqueIds }, isActive: true });
+    const products = await Product.find({ _id: { $in: uniqueIds }, isActive: true }).populate('store');
     if (products.length !== uniqueIds.length) return res.status(400).json({ error: "product_not_found" });
+    
+    // Get store from first product (assuming all products from same store for now)
+    const store = products[0]?.store;
+    
+    // Calculate base revenue (originalStorePrice total)
+    let baseTotal = 0;
+    for (const it of items) {
+      const p = products.find(x => x._id.toString() === it.productId);
+      const v = it.variantSku ? (p?.variants || []).find(v => v.sku === String(it.variantSku)) : null;
+      const basePrice = v ? (v.originalStorePrice || v.price || 0) : (p?.originalStorePrice || p?.price || 0);
+      baseTotal += basePrice * it.quantity;
+    }
+    
+    // Calculate admin cut and store revenue
+    const adminCutPercent = store?.adminCutPercentage || 5;
+    const adminRevenue = (baseTotal * adminCutPercent) / 100;
+    const storeRevenue = baseTotal - adminRevenue;
     
     const totals = computeTotals(products, items);
     const { discount: coupDiscount, finalAmount: payableTotal, couponId } = await validateAndApplyCoupon(couponCode, totals.total);
@@ -468,7 +489,10 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
       cashfreePaymentId,
       cashfreeSignature,
       codDueAmount: paymentMethod === "COD" ? (codDueAmount || Math.round((totalAmount || payableTotal) * 0.85 * 100) / 100) : 0,
-      notes: notes || ""
+      notes: notes || "",
+      store: store?._id || null,
+      storeRevenue: Number(storeRevenue.toFixed(2)),
+      adminRevenue: Number(adminRevenue.toFixed(2))
     });
 
     if (couponId) {

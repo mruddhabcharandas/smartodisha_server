@@ -426,14 +426,14 @@ router.get("/revenue/summary", auth, requireRole("admin"), async (req, res) => {
   try {
     const totalAgg = await Order.aggregate([
       { $match: { status: { $nin: ["CANCELLED", "PENDING_PAYMENT"] } } },
-      { $group: { _id: null, total: { $sum: "$totalEstimate" }, count: { $sum: 1 } } }
+      { $group: { _id: null, total: { $sum: "$totalEstimate" }, count: { $sum: 1 }, adminRevenue: { $sum: "$adminRevenue" } } }
     ]);
 
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const monthAgg = await Order.aggregate([
       { $match: { status: { $nin: ["CANCELLED", "PENDING_PAYMENT"] }, createdAt: { $gte: startOfMonth } } },
-      { $group: { _id: null, total: { $sum: "$totalEstimate" } } }
+      { $group: { _id: null, total: { $sum: "$totalEstimate" }, adminRevenue: { $sum: "$adminRevenue" } } }
     ]);
 
     const pendingCount = await Order.countDocuments({ status: "NEW" });
@@ -470,8 +470,10 @@ router.get("/revenue/summary", auth, requireRole("admin"), async (req, res) => {
 
     res.json({
       totalRevenue: totalAgg[0]?.total || 0,
+      totalAdminRevenue: totalAgg[0]?.adminRevenue || 0,
       totalOrders: totalAgg[0]?.count || 0,
       thisMonthRevenue: monthAgg[0]?.total || 0,
+      thisMonthAdminRevenue: monthAgg[0]?.adminRevenue || 0,
       pendingOrders: pendingCount,
       topProducts: topProductsAgg.map(p => ({
         id: p._id,
