@@ -35,14 +35,17 @@ router.get("/check-pincode", async (req, res) => {
     const data = response.data;
     const now = new Date();
     const add = (d, n) => { const x = new Date(d.getTime()); x.setDate(x.getDate() + n); return x; };
-    const etaStart = add(now, data?.eta || 3).toISOString();
-    const etaEnd = add(now, (data?.eta || 3) + 3).toISOString();
+    const eta = data?.eta || 3;
+    const etaStart = add(now, eta).toISOString();
+    const etaEnd = add(now, eta + 2).toISOString();
     const result = {
       pincode,
       delivery_available: !!data?.available,
       cod_available: !!data?.cod,
+      eta: eta,
       etaStart,
-      etaEnd
+      etaEnd,
+      rate: data?.rate
     };
     _putCache(cacheKey, result, 24 * 60 * 60 * 1000);
     res.json(result);
@@ -54,8 +57,10 @@ router.get("/check-pincode", async (req, res) => {
       pincode,
       delivery_available: true,
       cod_available: false,
+      eta: 3,
       etaStart: add(now, 3).toISOString(),
-      etaEnd: add(now, 6).toISOString()
+      etaEnd: add(now, 5).toISOString(),
+      rate: 85
     });
   }
 });
@@ -75,18 +80,22 @@ router.post("/calculate", async (req, res) => {
     });
     const data = response.data;
     const amt = Number(data?.rate || process.env.SHIPPING_BASE_CHARGE || 85);
-    const discount = amt;
-    const final = 0;
+    const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
+    const isFree = order_amount >= freeDeliveryAbove;
+    const discount = isFree ? amt : 0;
+    const final = isFree ? 0 : amt;
     res.json({
       origin,
       destination: dest,
       weight,
+      order_amount,
       amount: amt,
       discount,
       final,
-      label: "FREE DELIVERY",
+      label: isFree ? "FREE DELIVERY" : `₹${final} Delivery`,
       delivery_charge: amt,
-      final_charge: final
+      final_charge: final,
+      free_delivery_above: freeDeliveryAbove
     });
   } catch {
     const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
@@ -94,18 +103,22 @@ router.post("/calculate", async (req, res) => {
     const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
     const variable = perKg * (weight || 0.5);
     const amt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
-    const discount = amt;
-    const final = 0;
+    const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
+    const isFree = order_amount >= freeDeliveryAbove;
+    const discount = isFree ? amt : 0;
+    const final = isFree ? 0 : amt;
     res.json({
       origin,
       destination: dest,
       weight,
+      order_amount,
       amount: amt,
       discount,
       final,
-      label: "FREE DELIVERY",
+      label: isFree ? "FREE DELIVERY" : `₹${final} Delivery`,
       delivery_charge: amt,
-      final_charge: final
+      final_charge: final,
+      free_delivery_above: freeDeliveryAbove
     });
   }
 });
