@@ -8,9 +8,10 @@ const router = express.Router();
 
 const serializeCart = async (cart) => {
   if (!cart) return { items: [] };
-  await cart.populate("items.product", "name price gst images stock variants minOrderQty bulkDiscountQuantity bulkDiscountPriceReduction bulkTiers mrp packSize");
+  await cart.populate("items.product", "name price gst images stock variants weight minOrderQty bulkDiscountQuantity bulkDiscountPriceReduction bulkTiers mrp packSize originalStorePrice store");
+  // Filter out items where product is null (deleted or inactive)
   return {
-    items: cart.items.map((it) => {
+    items: cart.items.filter((it) => it.product != null).map((it) => {
       const base = {
         productId: it.product._id.toString(),
         quantity: it.quantity,
@@ -18,7 +19,9 @@ const serializeCart = async (cart) => {
         bulkDiscountPriceReduction: it.product.bulkDiscountPriceReduction || 0,
         bulkTiers: it.product.bulkTiers || [],
         mrp: it.product.mrp || it.product.price,
-        packSize: it.product.packSize || 1
+        packSize: it.product.packSize || 1,
+        originalStorePrice: it.product.originalStorePrice || it.product.price || 0,
+        storePercentage: it.product.store?.storePercentage || 0
       };
       if (it.variantSku) {
         const v = (it.product.variants || []).find(v => v.sku === it.variantSku);
@@ -29,11 +32,13 @@ const serializeCart = async (cart) => {
             name: it.product.name,
             attributes: v.attributes,
             price: v.price ?? it.product.price,
+            originalStorePrice: v.originalStorePrice ?? v.price ?? it.product.originalStorePrice ?? it.product.price,
             gst: it.product.gst || 0,
             stock: v.stock ?? 0,
             sku: v.sku,
             image: (v.images?.[0]?.url || it.product.images?.[0]?.url || ""),
-            minOrderQty: it.product.minOrderQty || 0
+            minOrderQty: it.product.minOrderQty || 0,
+            weight: v.weight || it.product.weight || 0
           };
         }
       }
@@ -44,7 +49,8 @@ const serializeCart = async (cart) => {
         gst: it.product.gst || 0,
         stock: it.product.stock,
         image: it.product.images?.[0]?.url || "",
-        minOrderQty: it.product.minOrderQty || 0
+        minOrderQty: it.product.minOrderQty || 0,
+        weight: it.product.weight || 0
       };
     })
   };
@@ -59,20 +65,10 @@ router.get("/", async (req, res) => {
 });
 
 router.post("/add", async (req, res) => {
-  console.log('=== /api/cart/add called ===')
-  console.log('req.body:', req.body)
-  
   const { productId, variantSku, quantity } = req.body || {};
   const qty = Math.round(Number(quantity || 1));
-  
-  console.log('Parsed values:', { productId, variantSku, quantity, qty })
-  
+
   if (!mongoose.isValidObjectId(productId) || !Number.isFinite(qty) || qty <= 0) {
-    console.log('Validation failed:', { 
-      validObjectId: mongoose.isValidObjectId(productId), 
-      validQty: Number.isFinite(qty), 
-      qtyPositive: qty > 0 
-    })
     return res.status(400).json({ error: "invalid_payload" });
   }
 

@@ -4,7 +4,7 @@ import Order from "../models/Order.js";
 import Store from "../models/Store.js";
 import Product from "../models/Product.js";
 import { auth, requireRole, requirePermission } from "../middleware/auth.js";
-import shiprocket from "../lib/shiprocket.js";
+import shiprocket, { checkServiceability } from "../lib/shiprocket.js";
 import PDFDocument from "pdfkit";
 import axios from "axios";
 
@@ -24,6 +24,19 @@ const _getCache = (key) => {
 
 
 // Helper to find best courier (prioritize Delhivery, then Blue Dart)
+const getStoreShiprocketCreds = async (storeId) => {
+  if (!storeId || !mongoose.isValidObjectId(storeId)) return {};
+  try {
+    const store = await Store.findById(storeId).select("shiprocketEmail shiprocketPassword pickupAddress");
+    if (store?.shiprocketEmail && store?.shiprocketPassword) {
+      return { email: store.shiprocketEmail, password: store.shiprocketPassword, store };
+    }
+    return { store };
+  } catch {
+    return {};
+  }
+};
+
 const findBestCourier = (couriers) => {
   if (!Array.isArray(couriers)) return null;
   
@@ -51,14 +64,9 @@ router.get("/check-pincode", async (req, res) => {
   if (!pincode) return res.status(400).json({ error: "missing_pincode" });
   
   let pickupPincode = process.env.SHIPROCKET_PICKUP_PINCODE || "360001";
-  
-  if (storeId && mongoose.isValidObjectId(storeId)) {
-    try {
-      const store = await Store.findById(storeId);
-      if (store?.pickupAddress?.pincode) {
-        pickupPincode = store.pickupAddress.pincode;
-      }
-    } catch {}
+  const { email: srEmail, password: srPassword, store } = await getStoreShiprocketCreds(storeId);
+  if (store?.pickupAddress?.pincode) {
+    pickupPincode = store.pickupAddress.pincode;
   }
   
   try {
@@ -75,12 +83,13 @@ router.get("/check-pincode", async (req, res) => {
         cod_available: codAvailable
       });
     }
-    const response = await shiprocket.post("/courier/serviceability", {
+    const weightKg = Math.max(0.5, Number(req.query.weight || 0) / 1000 || 0.5);
+    const response = await checkServiceability({
       pickup_postcode: pickupPincode,
       delivery_postcode: pincode,
-      weight: 0.5,
-      cod: 0
-    });
+      weight: weightKg,
+      cod: false
+    }, { email: srEmail, password: srPassword });
     const data = response.data;
     
     // Check if we have multiple courier options
@@ -133,39 +142,44 @@ router.post("/calculate", async (req, res) => {
   const storeId = req.body.store_id;
   let origin = String(req.body?.source_pin || process.env.SHIPROCKET_PICKUP_PINCODE || "360001").trim();
   
-  if (storeId && mongoose.isValidObjectId(storeId)) {
-    try {
-      const store = await Store.findById(storeId);
-      if (store?.pickupAddress?.pincode) {
-        origin = store.pickupAddress.pincode;
-      }
-    } catch {}
+  const { email: srEmail, password: srPassword, store } = await getStoreShiprocketCreds(storeId);
+  if (store?.pickupAddress?.pincode) {
+    origin = store.pickupAddress.pincode;
   }
-  
+
   const dest = String(req.body?.destination_pin || "").trim();
-  const weight = Number(req.body?.weight || 0);
+  const weightGrams = Number(req.body?.weight || 0);
+  const weight = weightGrams > 0 ? weightGrams / 1000 : 0.5;
   const order_amount = Number(req.body?.order_amount || 0);
   const payment_method = String(req.body?.payment_method || "prepaid").toLowerCase();
   if (!origin || !dest) return res.status(400).json({ error: "missing_pins" });
   
   try {
-    const response = await shiprocket.post("/courier/serviceability", {
+    const response = await checkServiceability({
       pickup_postcode: origin,
       delivery_postcode: dest,
-      weight: weight || 0.5,
-      cod: 0
-    });
+      weight,
+      cod: payment_method === "cod"
+    }, { email: srEmail, password: srPassword });
     const data = response.data;
-    
-    // Check if we have multiple courier options
+
     let selectedCourier = null;
-    if (data?.data?.couriers) {
-      selectedCourier = findBestCourier(data.data.couriers);
-    } else if (Array.isArray(data?.couriers)) {
-      selectedCourier = findBestCourier(data.couriers);
+    const courierList = data?.data?.available_courier_companies
+      || data?.data?.couriers
+      || data?.couriers
+      || [];
+    if (Array.isArray(courierList) && courierList.length) {
+      selectedCourier = findBestCourier(courierList);
     }
-    
-    const amt = Number(selectedCourier?.rate || data?.rate || process.env.SHIPPING_BASE_CHARGE || 85);
+
+    const amt = Number(
+      selectedCourier?.rate
+      || selectedCourier?.freight_charge
+      || data?.data?.available_courier_companies?.[0]?.rate
+      || data?.rate
+      || process.env.SHIPPING_BASE_CHARGE
+      || 85
+    );
     const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
     const isFree = order_amount >= freeDeliveryAbove;
     const discount = isFree ? amt : 0;
@@ -194,7 +208,7 @@ router.post("/calculate", async (req, res) => {
     const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
     const perKg = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
     const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
-    const variable = perKg * (weight || 0.5);
+    const variable = perKg * weight;
     const amt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
     const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
     const isFree = order_amount >= freeDeliveryAbove;

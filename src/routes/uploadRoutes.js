@@ -18,7 +18,10 @@ router.post("/image", auth, requireRole(["admin", "store"]), upload.single("file
       return res.json({ url: existing.url, key: existing.publicId });
     }
 
-    const result = await uploadBuffer(req.file.buffer, "products");
+    const result = await uploadBuffer(req.file.buffer, "products", {
+      mimetype: req.file.mimetype,
+      originalName: req.file.originalname
+    });
     
     await Image.create({ hash, url: result.url, publicId: result.key });
 
