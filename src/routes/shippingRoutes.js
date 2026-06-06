@@ -167,14 +167,11 @@ router.post("/calculate", async (req, res) => {
     
     const amt = Number(selectedCourier?.rate || data?.rate || process.env.SHIPPING_BASE_CHARGE || 85);
     const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
-    const isFree = order_amount >= freeDeliveryAbove && payment_method === "prepaid";
+    const isFree = order_amount >= freeDeliveryAbove;
     const discount = isFree ? amt : 0;
     let final = isFree ? 0 : amt;
-    // COD charge: 2% of order amount, minimum ₹20, maximum ₹100
-    const codCharge = Math.max(20, Math.min(100, Math.round((order_amount * 0.02) * 100) / 100));
-    if (payment_method === "cod") {
-      final = amt + codCharge;
-    }
+    // COD charge: REMOVED as per user request
+    const codCharge = 0;
     const codAvailable = (!!data?.cod || !!selectedCourier?.cod) && order_amount <= 2000;
     res.json({
       origin,
@@ -200,14 +197,11 @@ router.post("/calculate", async (req, res) => {
     const variable = perKg * (weight || 0.5);
     const amt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
     const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
-    const isFree = order_amount >= freeDeliveryAbove && payment_method === "prepaid";
+    const isFree = order_amount >= freeDeliveryAbove;
     const discount = isFree ? amt : 0;
     let final = isFree ? 0 : amt;
-    // COD charge: 2% of order amount, minimum ₹20, maximum ₹100
-    const codCharge = Math.max(20, Math.min(100, Math.round((order_amount * 0.02) * 100) / 100));
-    if (payment_method === "cod") {
-      final = amt + codCharge;
-    }
+    // COD charge: REMOVED as per user request
+    const codCharge = 0;
     const codAvailable = order_amount <= 2000;
     res.json({
       origin,
