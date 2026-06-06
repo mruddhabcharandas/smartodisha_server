@@ -21,6 +21,7 @@ const storeSchema = new mongoose.Schema(
     },
     gstNumber: { type: String, default: "" },
     image: { type: imageSchema, default: null },
+    sellerAvatar: { type: imageSchema, default: null },
     storePercentage: { type: Number, default: 0, min: 0 }, // Store's markup percentage
     adminCutPercentage: { type: Number, default: 5, min: 0 }, // Admin's percentage cut
     isActive: { type: Boolean, default: true },

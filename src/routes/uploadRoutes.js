@@ -8,7 +8,7 @@ import { Image } from "../models/Image.js";
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
-router.post("/image", auth, requireRole("admin"), upload.single("file"), async (req, res) => {
+router.post("/image", auth, requireRole(["admin", "store"]), upload.single("file"), async (req, res) => {
   if (!process.env.AWS_S3_BUCKET_NAME) return res.status(503).json({ error: "s3_not_configured" });
   if (!req.file) return res.status(400).json({ error: "missing_file" });
   try {

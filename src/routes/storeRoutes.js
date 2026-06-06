@@ -206,7 +206,7 @@ router.get("/profile", protect, async (req, res) => {
 // Update store profile
 router.put("/profile", protect, async (req, res) => {
   try {
-    const { name, phone, address, gstNumber, pickupAddress, pickupName, pickupPhone, shiprocketEmail, shiprocketPassword } = req.body;
+    const { name, phone, address, gstNumber, pickupAddress, pickupName, pickupPhone, shiprocketEmail, shiprocketPassword, image, sellerAvatar } = req.body;
     const store = await Store.findById(req.store._id);
 
     if (store) {
@@ -219,6 +219,28 @@ router.put("/profile", protect, async (req, res) => {
       store.pickupPhone = pickupPhone || store.pickupPhone;
       store.shiprocketEmail = shiprocketEmail || store.shiprocketEmail;
       store.shiprocketPassword = shiprocketPassword || store.shiprocketPassword;
+      
+      // Update image if provided
+      if (image) {
+        if (typeof image === "string") {
+          store.image = { url: image };
+        } else if (image.url) {
+          store.image = image;
+        }
+      }
+      
+      // Update seller avatar if provided
+      if (sellerAvatar !== undefined) { // Handle both setting and clearing
+        if (sellerAvatar) {
+          if (typeof sellerAvatar === "string") {
+            store.sellerAvatar = { url: sellerAvatar };
+          } else if (sellerAvatar.url) {
+            store.sellerAvatar = sellerAvatar;
+          }
+        } else {
+          store.sellerAvatar = null;
+        }
+      }
 
       const updatedStore = await store.save();
       res.json(updatedStore);
