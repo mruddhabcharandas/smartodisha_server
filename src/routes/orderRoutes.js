@@ -678,8 +678,13 @@ router.post("/:id/cancel", auth, requirePermission("orders"), async (req, res) =
     if (!order) return res.status(404).json({ error: "not_found" });
     
     // Check if order can be cancelled
-    if (["CANCELLED", "RETURNED"].includes(order.status)) {
-      return res.status(400).json({ error: "order_already_cancelled" });
+    if (["CANCELLED", "RETURNED", "SHIPPED", "OUT_FOR_DELIVERY", "DELIVERED", "FULFILLED"].includes(order.status)) {
+      return res.status(400).json({ error: "cannot_cancel_shipped_order" });
+    }
+
+    // Also check if we have a waybill or shipment created
+    if (order.shipping?.waybill || order.shiprocketOrderId || order.shiprocketAwbNumber) {
+      return res.status(400).json({ error: "cannot_cancel_shipped_order" });
     }
     
     if (order.paymentStatus !== "PAID" || order.paymentMethod !== "CASHFREE") {

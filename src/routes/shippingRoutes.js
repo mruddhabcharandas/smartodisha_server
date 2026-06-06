@@ -21,43 +21,27 @@ const _getCache = (key) => {
   return it.data;
 };
 
-const getStoreShiprocketClient = async (storeId) => {
-  if (!storeId) return shiprocket;
+
+
+// Helper to find best courier (prioritize Delhivery, then Blue Dart)
+const findBestCourier = (couriers) => {
+  if (!Array.isArray(couriers)) return null;
   
-  const store = await Store.findById(storeId);
-  if (!store || !store.shiprocketEmail || !store.shiprocketPassword) return shiprocket;
+  // Priority 1: Delhivery
+  const delhivery = couriers.find(c => 
+    String(c.name || c.courier_name || c.courier || '').toLowerCase().includes('delhivery')
+  );
+  if (delhivery) return delhivery;
   
-  try {
-    let token = null;
-    const cacheKey = `shiprocket_token_${storeId}`;
-    if (_cache.has(cacheKey)) {
-      const cached = _cache.get(cacheKey);
-      if (cached.expires > Date.now()) {
-        token = cached.token;
-      }
-    }
-    
-    if (!token) {
-      const response = await axios.post("https://apiv2.shiprocket.in/v1/external/auth/login", {
-        email: store.shiprocketEmail,
-        password: store.shiprocketPassword
-      });
-      token = response.data.token;
-      _cache.set(cacheKey, { token, expires: Date.now() + 7 * 60 * 60 * 1000 });
-    }
-    
-    const client = axios.create({
-      baseURL: "https://apiv2.shiprocket.in/v1/external"
-    });
-    client.interceptors.request.use(async (config) => {
-      config.headers.Authorization = `Bearer ${token}`;
-      return config;
-    });
-    return client;
-  } catch (error) {
-    console.error("Failed to get store-specific shiprocket client:", error.message);
-    return shiprocket;
-  }
+  // Priority 2: Blue Dart
+  const blueDart = couriers.find(c => 
+    String(c.name || c.courier_name || c.courier || '').toLowerCase().includes('blue dart') ||
+    String(c.name || c.courier_name || c.courier || '').toLowerCase().includes('bluedart')
+  );
+  if (blueDart) return blueDart;
+  
+  // Fallback: first available
+  return couriers[0];
 };
 
 router.get("/check-pincode", async (req, res) => {
@@ -98,10 +82,20 @@ router.get("/check-pincode", async (req, res) => {
       cod: 0
     });
     const data = response.data;
-    deliveryAvailable = !!data?.available;
+    
+    // Check if we have multiple courier options
+    let selectedCourier = null;
+    if (data?.data?.couriers) {
+      selectedCourier = findBestCourier(data.data.couriers);
+    } else if (Array.isArray(data?.couriers)) {
+      selectedCourier = findBestCourier(data.couriers);
+    }
+    
+    deliveryAvailable = !!data?.available || !!selectedCourier;
     codAvailable = !!data?.cod && order_amount <= 2000;
-    eta = data?.eta || 3;
-    rate = data?.rate || 85;
+    eta = selectedCourier?.eta || data?.eta || 3;
+    rate = selectedCourier?.rate || data?.rate || 85;
+    
     const now = new Date();
     const add = (d, n) => { const x = new Date(d.getTime()); x.setDate(x.getDate() + n); return x; };
     const etaStart = add(now, eta).toISOString();
@@ -113,7 +107,8 @@ router.get("/check-pincode", async (req, res) => {
       eta: eta,
       etaStart,
       etaEnd,
-      rate: rate
+      rate: rate,
+      selected_courier: selectedCourier?.name || 'Delhivery'
     };
     _putCache(cacheKey, { ...result, cod_available: !!data?.cod }, 24 * 60 * 60 * 1000);
     res.json(result);
@@ -128,7 +123,8 @@ router.get("/check-pincode", async (req, res) => {
       eta: 3,
       etaStart: add(now, 3).toISOString(),
       etaEnd: add(now, 5).toISOString(),
-      rate: 85
+      rate: 85,
+      selected_courier: 'Delhivery'
     });
   }
 });
@@ -160,7 +156,16 @@ router.post("/calculate", async (req, res) => {
       cod: 0
     });
     const data = response.data;
-    const amt = Number(data?.rate || process.env.SHIPPING_BASE_CHARGE || 85);
+    
+    // Check if we have multiple courier options
+    let selectedCourier = null;
+    if (data?.data?.couriers) {
+      selectedCourier = findBestCourier(data.data.couriers);
+    } else if (Array.isArray(data?.couriers)) {
+      selectedCourier = findBestCourier(data.couriers);
+    }
+    
+    const amt = Number(selectedCourier?.rate || data?.rate || process.env.SHIPPING_BASE_CHARGE || 85);
     const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
     const isFree = order_amount >= freeDeliveryAbove && payment_method === "prepaid";
     const discount = isFree ? amt : 0;
@@ -169,7 +174,7 @@ router.post("/calculate", async (req, res) => {
     if (payment_method === "cod") {
       final = amt + codCharge;
     }
-    const codAvailable = !!data?.cod && order_amount <= 2000;
+    const codAvailable = (!!data?.cod || !!selectedCourier?.cod) && order_amount <= 2000;
     res.json({
       origin,
       destination: dest,
@@ -184,7 +189,8 @@ router.post("/calculate", async (req, res) => {
       final_charge: final,
       free_delivery_above: freeDeliveryAbove,
       cod_available: codAvailable,
-      cod_charge: payment_method === "cod" ? codCharge : 0
+      cod_charge: payment_method === "cod" ? codCharge : 0,
+      selected_courier: selectedCourier?.name || 'Delhivery'
     });
   } catch {
     const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
@@ -215,7 +221,8 @@ router.post("/calculate", async (req, res) => {
       final_charge: final,
       free_delivery_above: freeDeliveryAbove,
       cod_available: codAvailable,
-      cod_charge: payment_method === "cod" ? codCharge : 0
+      cod_charge: payment_method === "cod" ? codCharge : 0,
+      selected_courier: 'Delhivery'
     });
   }
 });
@@ -287,12 +294,11 @@ router.post("/shiprocket/create", auth, requirePermission("orders"), async (req,
     let client = shiprocket;
     let pickupLocation = process.env.SHIPROCKET_PICKUP_NAME || "Warehouse";
     let pickupAddress = { line1: "", line2: "", city: "", state: "", pincode: process.env.SHIPROCKET_PICKUP_PINCODE || "360001" };
-    let pickupPhone = "";
+    let pickupPhone = process.env.SHIPROCKET_PICKUP_PHONE || "";
     
     if (mainStoreId && mongoose.isValidObjectId(mainStoreId)) {
       store = await Store.findById(mainStoreId);
       if (store) {
-        client = await getStoreShiprocketClient(mainStoreId);
         if (store.pickupAddress) pickupAddress = store.pickupAddress;
         if (store.pickupName) pickupLocation = store.pickupName;
         if (store.pickupPhone) pickupPhone = store.pickupPhone;
@@ -347,22 +353,52 @@ router.post("/shiprocket/create", auth, requirePermission("orders"), async (req,
 
     const weightKg = totalWeightGrams > 0 ? (totalWeightGrams / 1000) : 0.5;
     const cleanPhone = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
+    
+    // First check serviceability to get best courier
+    let selectedCourierId = null;
+    try {
+      const serviceability = await client.post("/courier/serviceability", {
+        pickup_postcode: pickupAddress.pincode,
+        delivery_postcode: addr.pincode,
+        weight: weightKg,
+        cod: 0
+      });
+      
+      if (serviceability.data?.data?.couriers || Array.isArray(serviceability.data?.couriers)) {
+        const selectedCourier = findBestCourier(serviceability.data?.data?.couriers || serviceability.data?.couriers);
+        if (selectedCourier?.courier_id || selectedCourier?.id) {
+          selectedCourierId = selectedCourier.courier_id || selectedCourier.id;
+        }
+      }
+    } catch (e) {
+      console.log("Serviceability check for courier selection failed, proceeding without specific courier");
+    }
 
     const shipment = {
       order_id: order._id.toString(),
       order_date: new Date().toISOString().split('T')[0],
       pickup_location: pickupLocation,
-      billing_customer_name: order.customer.name,
+      billing_customer_name: store?.name || pickupLocation,
       billing_last_name: "",
-      billing_address: addr.line1,
-      billing_address_2: addr.line2,
-      billing_city: addr.city,
-      billing_pincode: addr.pincode,
-      billing_state: addr.state,
+      billing_address: pickupAddress.line1,
+      billing_address_2: pickupAddress.line2,
+      billing_city: pickupAddress.city,
+      billing_pincode: pickupAddress.pincode,
+      billing_state: pickupAddress.state,
       billing_country: "India",
-      billing_email: order.customer.email || "customer@example.com",
-      billing_phone: cleanPhone,
-      shipping_is_billing: true,
+      billing_email: store?.email || process.env.SHIPROCKET_EMAIL || "store@example.com",
+      billing_phone: pickupPhone || String(order.customer.phone || "").replace(/\D/g, "").slice(-10),
+      shipping_is_billing: false,
+      shipping_customer_name: order.customer.name,
+      shipping_last_name: "",
+      shipping_address: addr.line1,
+      shipping_address_2: addr.line2,
+      shipping_city: addr.city,
+      shipping_pincode: addr.pincode,
+      shipping_state: addr.state,
+      shipping_country: "India",
+      shipping_email: order.customer.email || "customer@example.com",
+      shipping_phone: cleanPhone,
       order_items: orderItems,
       payment_method: "Prepaid",
       shipping_charges: 0,
@@ -373,7 +409,9 @@ router.post("/shiprocket/create", auth, requirePermission("orders"), async (req,
       length: 10,
       breadth: 10,
       height: 10,
-      weight: weightKg
+      weight: weightKg,
+      // Optional: force our selected courier
+      ...(selectedCourierId && { courier_id: selectedCourierId })
     };
 
     const response = await client.post("/orders/create/adhoc", shipment);
