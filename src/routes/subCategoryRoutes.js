@@ -6,7 +6,7 @@ import { auth, requireRole, requirePermission } from "../middleware/auth.js";
 const router = express.Router();
 
 router.post("/", auth, requirePermission("products"), async (req, res) => {
-  const { name, slug, categoryId } = req.body || {};
+  const { name, slug, categoryId, image } = req.body || {};
   if (!name || !slug || !categoryId) return res.status(400).json({ error: "missing_fields" });
   
   if (!mongoose.isValidObjectId(categoryId)) return res.status(400).json({ error: "invalid_category" });
@@ -14,7 +14,7 @@ router.post("/", auth, requirePermission("products"), async (req, res) => {
   const exists = await SubCategory.findOne({ $or: [{ name }, { slug }], category: categoryId });
   if (exists) return res.status(409).json({ error: "duplicate_subcategory" });
   
-  const doc = await SubCategory.create({ name, slug, category: categoryId });
+  const doc = await SubCategory.create({ name, slug, category: categoryId, image: image || "" });
   res.status(201).json(doc);
 });
 
@@ -31,7 +31,7 @@ router.get("/", async (req, res) => {
 
 router.put("/:id", auth, requireRole("admin"), async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
-  const { name, slug, categoryId, isActive } = req.body || {};
+  const { name, slug, categoryId, isActive, image } = req.body || {};
   const payload = {};
   if (name) payload.name = name;
   if (slug) payload.slug = slug;
@@ -40,6 +40,7 @@ router.put("/:id", auth, requireRole("admin"), async (req, res) => {
     payload.category = categoryId;
   }
   if (isActive !== undefined) payload.isActive = isActive;
+  if (image !== undefined) payload.image = image;
   
   const updated = await SubCategory.findByIdAndUpdate(req.params.id, payload, { new: true });
   if (!updated) return res.status(404).json({ error: "not_found" });

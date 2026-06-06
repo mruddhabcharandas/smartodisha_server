@@ -18,8 +18,7 @@ export const uploadBuffer = async (buffer, folder = "products") => {
   const command = new PutObjectCommand({
     Bucket: process.env.AWS_S3_BUCKET_NAME,
     Key: key,
-    Body: buffer,
-    ACL: "public-read"
+    Body: buffer
   });
 
   await s3Client.send(command);
@@ -33,8 +32,7 @@ export const getPresignedUrl = async (key, expiresIn = 3600) => {
   
   const command = new PutObjectCommand({
     Bucket: process.env.AWS_S3_BUCKET_NAME,
-    Key: key,
-    ACL: "public-read"
+    Key: key
   });
   
   return await getSignedUrl(s3Client, command, { expiresIn });
