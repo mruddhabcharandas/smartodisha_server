@@ -206,7 +206,7 @@ router.get("/profile", protect, async (req, res) => {
 // Update store profile
 router.put("/profile", protect, async (req, res) => {
   try {
-    const { name, phone, address, gstNumber } = req.body;
+    const { name, phone, address, gstNumber, pickupAddress, pickupName, pickupPhone, shiprocketEmail, shiprocketPassword } = req.body;
     const store = await Store.findById(req.store._id);
 
     if (store) {
@@ -214,6 +214,11 @@ router.put("/profile", protect, async (req, res) => {
       store.phone = phone || store.phone;
       store.address = address || store.address;
       store.gstNumber = gstNumber || store.gstNumber;
+      store.pickupAddress = pickupAddress || store.pickupAddress;
+      store.pickupName = pickupName || store.pickupName;
+      store.pickupPhone = pickupPhone || store.pickupPhone;
+      store.shiprocketEmail = shiprocketEmail || store.shiprocketEmail;
+      store.shiprocketPassword = shiprocketPassword || store.shiprocketPassword;
 
       const updatedStore = await store.save();
       res.json(updatedStore);

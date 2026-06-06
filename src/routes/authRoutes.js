@@ -111,7 +111,7 @@ router.post("/customer/verify-otp", async (req, res) => {
   const token = jwt.sign(
     { id: customer._id.toString(), role: "customer", email: customer.email },
     process.env.JWT_SECRET,
-    { expiresIn: "168h" } // 7 days
+    { expiresIn: "30d" } // 30 days
   );
 
   res.json({

@@ -26,7 +26,19 @@ const storeSchema = new mongoose.Schema(
     isActive: { type: Boolean, default: true },
     isVerified: { type: Boolean, default: true },
     resetPasswordToken: { type: String },
-    resetPasswordExpires: { type: Date }
+    resetPasswordExpires: { type: Date },
+    // Shiprocket & Pickup Details
+    pickupAddress: {
+      line1: { type: String, default: "" },
+      line2: { type: String, default: "" },
+      city: { type: String, default: "" },
+      state: { type: String, default: "" },
+      pincode: { type: String, default: "" }
+    },
+    pickupName: { type: String, default: "" },
+    pickupPhone: { type: String, default: "" },
+    shiprocketEmail: { type: String, default: "" },
+    shiprocketPassword: { type: String, default: "" }
   },
   { timestamps: true }
 );
