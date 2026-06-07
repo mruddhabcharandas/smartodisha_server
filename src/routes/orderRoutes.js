@@ -1,6 +1,7 @@
 
 import express from "express";
 import mongoose from "mongoose";
+import axios from "axios";
 import Order from "../models/Order.js";
 import Product from "../models/Product.js";
 import Customer from "../models/Customer.js";
@@ -391,16 +392,60 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
     const minAmount = Number(process.env.MIN_ORDER_AMOUNT || 5000);
     if (totals.total < minAmount) return res.status(400).json({ error: "min_order_not_met", minAmount });
 
-    const { finalAmount: payableTotal } = await validateAndApplyCoupon(couponCode, totals.total);
+    const { finalAmount: payableProductTotal } = await validateAndApplyCoupon(couponCode, totals.total);
+
+    // Calculate shipping cost
+    let shippingCost = 0;
+    let codCharge = 0;
+    try {
+      // Calculate total weight for shipping
+      let totalWeightGrams = 0;
+      for (const it of items) {
+        const p = products.find(x => x._id.toString() === it.productId.toString());
+        if (p && p.weight) {
+          totalWeightGrams += (p.weight * it.quantity);
+        } else {
+          totalWeightGrams += 500 * it.quantity; // default 500g per item
+        }
+      }
+      
+      const store = products[0]?.store;
+      let pickupPincode = process.env.SHIPROCKET_PICKUP_PINCODE || "360001";
+      if (store?.pickupAddress?.pincode) {
+        pickupPincode = store.pickupAddress.pincode;
+      }
+      
+      const response = await axios.post("http://localhost:5000/api/shipping/calculate", {
+        store_id: store?._id,
+        source_pin: pickupPincode,
+        destination_pin: deliveryAddress.pincode,
+        weight: totalWeightGrams,
+        order_amount: payableProductTotal,
+        payment_method: paymentMethod.toLowerCase()
+      });
+      
+      shippingCost = response.data.delivery_charge || 0;
+      codCharge = response.data.cod_charge || 0;
+    } catch (e) {
+      console.error("Shipping calculation failed, using default:", e.message);
+      const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
+      const isPrepaidFree = payableProductTotal >= freeDeliveryAbove && paymentMethod === 'CASHFREE';
+      shippingCost = isPrepaidFree ? 0 : 85;
+      if (paymentMethod === "COD") {
+        codCharge = Math.min(Math.max(Math.round(payableProductTotal * 0.05), 40), 100);
+      }
+    }
+
+    const totalPayable = Number((payableProductTotal + shippingCost + codCharge).toFixed(2));
 
     const appId = process.env.CASHFREE_APP_ID || "";
     const isSandbox = appId.toUpperCase().startsWith("TEST");
     const cashfreeMode = isSandbox ? "sandbox" : "production";
 
     if (paymentMethod === "COD") {
-      // COD requires 15% advance
-      const advanceAmount = Math.round(payableTotal * 0.15 * 100) / 100;
-      const codDueAmount = Math.round(payableTotal * 0.85 * 100) / 100;
+      // COD requires 15% advance on total amount
+      const advanceAmount = Math.round(totalPayable * 0.15 * 100) / 100;
+      const codDueAmount = Math.round(totalPayable * 0.85 * 100) / 100;
       
       if (!process.env.CASHFREE_APP_ID || !process.env.CASHFREE_SECRET_KEY) {
         return res.status(500).json({ error: "cashfree_not_configured" });
@@ -422,7 +467,10 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
         cashfreeOrderId: data.order_id,
         paymentSessionId: data.payment_session_id,
         amount: advanceAmount,
-        totalAmount: payableTotal,
+        totalAmount: totalPayable,
+        productTotal: payableProductTotal,
+        shippingCost,
+        codCharge,
         codDueAmount,
         paymentMethod: "COD",
         cashfreeMode
@@ -434,7 +482,7 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
       
       const { data } = await cashfree.post("/pg/orders", {
         order_id: `prepay_${Date.now()}`,
-        order_amount: payableTotal,
+        order_amount: totalPayable,
         order_currency: "INR",
         customer_details: {
           customer_id: `customer_${cust._id.toString()}`,
@@ -447,7 +495,9 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
       return res.json({
         cashfreeOrderId: data.order_id,
         paymentSessionId: data.payment_session_id,
-        amount: payableTotal,
+        amount: totalPayable,
+        productTotal: payableProductTotal,
+        shippingCost,
         paymentMethod: "CASHFREE",
         cashfreeMode
       });
@@ -460,7 +510,7 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
 
 // Create Order after payment verification (new flow)
 router.post("/create-after-verify", auth, requireRole("customer"), async (req, res) => {
-  const { cashfreeOrderId, cashfreePaymentId, cashfreeSignature, items, paymentMethod, notes, couponCode, deliveryAddress, totalAmount, codDueAmount } = req.body || {};
+  const { cashfreeOrderId, cashfreePaymentId, cashfreeSignature, items, paymentMethod, notes, couponCode, deliveryAddress, totalAmount, codDueAmount, productTotal, shippingCost, codCharge } = req.body || {};
   if (!["CASHFREE", "COD"].includes(paymentMethod)) return res.status(400).json({ error: "invalid_payment_method" });
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "no_items" });
 
@@ -509,10 +559,11 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
     const storeRevenue = baseTotal * (1 - adminCutPercent / 100);
     
     const totals = computeTotals(products, items);
-    const { discount: coupDiscount, finalAmount: payableTotal, couponId } = await validateAndApplyCoupon(couponCode, totals.total);
+    const { discount: coupDiscount, finalAmount: payableProductTotal, couponId } = await validateAndApplyCoupon(couponCode, totals.total);
     
-    const actualTotal = paymentMethod === "COD" ? (totalAmount || payableTotal) : payableTotal;
-    const adminRevenue = actualTotal - storeRevenue;
+    // Use provided totals or calculate
+    const finalTotal = totalAmount || payableProductTotal + (shippingCost || 0) + (codCharge || 0);
+    const adminRevenue = finalTotal - storeRevenue;
     
     for (const it of items) {
       const p = products.find(x => x._id.toString() === it.productId);
@@ -561,7 +612,10 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
       customer: { name: cust.name, phone: cust.phone, email: cust.email || "" },
       shippingAddress,
       items: orderItems,
-      totalEstimate: paymentMethod === "COD" ? (totalAmount || payableTotal) : payableTotal,
+      totalEstimate: finalTotal,
+      productTotal: productTotal || payableProductTotal,
+      shippingCost: shippingCost || 0,
+      codCharge: codCharge || 0,
       couponCode: couponCode?.toUpperCase() || "",
       couponDiscount: coupDiscount,
       status: "CONFIRMED",
@@ -570,7 +624,7 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
       cashfreeOrderId,
       cashfreePaymentId,
       cashfreeSignature,
-      codDueAmount: paymentMethod === "COD" ? (codDueAmount || Math.round((totalAmount || payableTotal) * 0.85 * 100) / 100) : 0,
+      codDueAmount: paymentMethod === "COD" ? (codDueAmount || Math.round(finalTotal * 0.85 * 100) / 100) : 0,
       notes: notes || "",
       store: store?._id || null,
       storeRevenue: Number(storeRevenue.toFixed(2)),
@@ -627,7 +681,7 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
         highlight: `Order ID: ${doc._id}`,
         blocks: [
           { label: "Payment Method", value: paymentMethod },
-          { label: "Amount Paid", value: `₹${Number(paymentMethod === "COD" ? Math.round((totalAmount || payableTotal) * 0.15 * 100) / 100 : doc.totalEstimate).toLocaleString("en-IN")}` },
+          { label: "Amount Paid", value: `₹${Number(paymentMethod === "COD" ? Math.round(finalTotal * 0.15 * 100) / 100 : doc.totalEstimate).toLocaleString("en-IN")}` },
           ...(paymentMethod === "COD" ? [{ label: "COD Due Amount", value: `₹${Number(doc.codDueAmount).toLocaleString("en-IN")}` }] : []),
           { label: "Current Status", value: doc.status }
         ]

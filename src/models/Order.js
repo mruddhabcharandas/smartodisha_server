@@ -26,6 +26,9 @@ const orderSchema = new mongoose.Schema(
     store: { type: mongoose.Schema.Types.ObjectId, ref: "Store", required: true }, // Added store reference
     items: { type: [orderItemSchema], required: true },
     totalEstimate: { type: Number, required: true },
+    productTotal: { type: Number, default: 0 }, // Total after coupon, before shipping
+    shippingCost: { type: Number, default: 0 },
+    codCharge: { type: Number, default: 0 },
     storeRevenue: { type: Number, default: 0 }, // Store's revenue after admin cut
     adminRevenue: { type: Number, default: 0 }, // Admin's cut
     couponCode: { type: String, default: "" },
