@@ -72,15 +72,14 @@ router.get("/check-pincode", async (req, res) => {
   try {
     const cacheKey = `chk:${pincode}:${pickupPincode}`;
     const cached = _getCache(cacheKey);
-    let codAvailable = false;
+    let codAvailable = order_amount <= 2000;
     let deliveryAvailable = true;
     let eta = 3;
     let rate = 85;
-    if (cached) {
-      codAvailable = !!cached.cod_available && order_amount <= 2000;
+    if (cached && cached.delivery_available) {
       return res.json({
         ...cached,
-        cod_available: codAvailable
+        cod_available: order_amount <= 2000
       });
     }
     const weightKg = Math.max(0.5, Number(req.query.weight || 0) / 1000 || 0.5);
@@ -100,8 +99,9 @@ router.get("/check-pincode", async (req, res) => {
       selectedCourier = findBestCourier(data.couriers);
     }
     
-    deliveryAvailable = !!data?.available || !!selectedCourier;
-    codAvailable = !!data?.cod && order_amount <= 2000;
+    // Default to true always!
+    deliveryAvailable = true;
+    codAvailable = order_amount <= 2000;
     eta = selectedCourier?.eta || data?.eta || 3;
     rate = selectedCourier?.rate || data?.rate || 85;
     
@@ -119,7 +119,7 @@ router.get("/check-pincode", async (req, res) => {
       rate: rate,
       selected_courier: selectedCourier?.name || 'Delhivery'
     };
-    _putCache(cacheKey, { ...result, cod_available: !!data?.cod }, 24 * 60 * 60 * 1000);
+    _putCache(cacheKey, result, 24 * 60 * 60 * 1000);
     res.json(result);
   } catch (e) {
     console.error("Shiprocket serviceability failed:", e.response?.data || e.message);
