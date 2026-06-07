@@ -56,6 +56,25 @@ const withDerived = (p) => {
 
 const sanitizeProduct = (p, canViewPrice) => {
   let obj = withDerived(p);
+  const storePercentage = obj.store?.storePercentage || 0;
+  if (storePercentage > 0) {
+    obj.price = Number((obj.price * (1 + storePercentage / 100)).toFixed(2));
+    if (obj.mrp != null) {
+      obj.mrp = Number((obj.mrp * (1 + storePercentage / 100)).toFixed(2));
+    }
+    if (obj.variants && obj.variants.length > 0) {
+      obj.variants = obj.variants.map(v => {
+        const vObj = v.toObject ? v.toObject() : { ...v };
+        if (vObj.price != null) {
+          vObj.price = Number((vObj.price * (1 + storePercentage / 100)).toFixed(2));
+        }
+        if (vObj.mrp != null) {
+          vObj.mrp = Number((vObj.mrp * (1 + storePercentage / 100)).toFixed(2));
+        }
+        return vObj;
+      });
+    }
+  }
   return obj;
 };
 
@@ -103,6 +122,7 @@ router.get("/grouped", async (req, res) => {
     ];
 
     const groupedResults = await Product.aggregate(pipeline);
+    await Product.populate(groupedResults, { path: "products.store", select: "storePercentage adminCutPercentage name" });
     
     return groupedResults.map(group => ({
       category: group.categoryInfo,
@@ -299,6 +319,7 @@ router.get("/:idOrSlug/recommendations", async (req, res) => {
       ...(base.price != null ? { price: priceRange } : {}),
       _id: { $ne: base._id }
     })
+    .populate("store", "storePercentage adminCutPercentage name")
     .sort({ stock: -1, createdAt: -1 })
     .limit(limit);
   const canViewPrice = isViewerAuthorized(req);
@@ -333,7 +354,7 @@ router.get("/recommend", async (req, res) => {
     ...(base.price != null ? { price: priceRange } : {}),
     _id: excludeIds.length ? { $ne: base._id, $nin: excludeIds } : { $ne: base._id }
   };
-  const candidates = await Product.find(filter).sort({ stock: -1, createdAt: -1 }).limit(20).lean();
+  const candidates = await Product.find(filter).populate("store", "storePercentage adminCutPercentage name").sort({ stock: -1, createdAt: -1 }).limit(20).lean();
   const withMargin = candidates.map(c => {
     const margin = (c.margin != null) ? Number(c.margin) : ((c.mrp && c.mrp > c.price) ? (c.mrp - c.price) : 0);
     return { doc: c, margin };

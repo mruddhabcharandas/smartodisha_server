@@ -18,6 +18,25 @@ const withDerived = (p) => {
 
 const sanitizeForViewer = (p, canViewPrice) => {
   let obj = withDerived(p);
+  const storePercentage = obj.store?.storePercentage || 0;
+  if (storePercentage > 0) {
+    obj.price = Number((obj.price * (1 + storePercentage / 100)).toFixed(2));
+    if (obj.mrp != null) {
+      obj.mrp = Number((obj.mrp * (1 + storePercentage / 100)).toFixed(2));
+    }
+    if (obj.variants && obj.variants.length > 0) {
+      obj.variants = obj.variants.map(v => {
+        const vObj = v.toObject ? v.toObject() : { ...v };
+        if (vObj.price != null) {
+          vObj.price = Number((vObj.price * (1 + storePercentage / 100)).toFixed(2));
+        }
+        if (vObj.mrp != null) {
+          vObj.mrp = Number((vObj.mrp * (1 + storePercentage / 100)).toFixed(2));
+        }
+        return vObj;
+      });
+    }
+  }
   if (canViewPrice) return obj;
   delete obj.price;
   delete obj.gst;
@@ -52,7 +71,7 @@ router.get("/reorder", auth, requireRole("customer"), async (req, res) => {
     }
   }
   const sortedIds = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).map(([id]) => id).slice(0, 12);
-  const docs = await Product.find({ _id: { $in: sortedIds }, isActive: true });
+  const docs = await Product.find({ _id: { $in: sortedIds }, isActive: true }).populate("store", "storePercentage adminCutPercentage name");
   const docMap = new Map(docs.map(d => [d._id.toString(), d]));
   const ordered = sortedIds.map(id => docMap.get(id)).filter(Boolean);
   res.json(ordered.map(d => sanitizeForViewer(d, true)));
@@ -63,6 +82,7 @@ router.get("/trending", async (req, res) => {
   const limit = Math.min(20, Math.max(1, parseInt(req.query.limit) || 10));
   // Criteria: high rating, bestseller, or recently added with stock
   const items = await Product.find({ isActive: true, stock: { $gt: 0 } })
+    .populate("store", "storePercentage adminCutPercentage name")
     .sort({ ratingCount: -1, createdAt: -1 })
     .limit(limit);
   const canView = isViewerAuthorized(req);
@@ -92,6 +112,7 @@ router.get("/similar/:productId", async (req, res) => {
     ],
     ...(base.price != null ? { price: priceRange } : {})
   })
+  .populate("store", "storePercentage adminCutPercentage name")
   .sort({ ratingCount: -1, stock: -1 })
   .limit(limit);
 
@@ -139,7 +160,7 @@ router.get("/frequently-bought/:productId", async (req, res) => {
   const docs = await Product.find({ 
     _id: { $in: ids, $ne: new mongoose.Types.ObjectId(pid) }, 
     isActive: true 
-  });
+  }).populate("store", "storePercentage adminCutPercentage name");
   const canView = isViewerAuthorized(req);
   res.json(docs.filter(d => !finalExclude.has(d._id.toString())).map(d => sanitizeForViewer(d, canView)));
 });

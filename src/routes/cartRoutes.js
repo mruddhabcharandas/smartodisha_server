@@ -8,30 +8,43 @@ const router = express.Router();
 
 const serializeCart = async (cart) => {
   if (!cart) return { items: [] };
-  await cart.populate("items.product", "name price gst images stock variants weight minOrderQty bulkDiscountQuantity bulkDiscountPriceReduction bulkTiers mrp packSize originalStorePrice store");
+  await cart.populate({
+    path: "items.product",
+    select: "name price gst images stock variants weight minOrderQty bulkDiscountQuantity bulkDiscountPriceReduction bulkTiers mrp packSize originalStorePrice store",
+    populate: {
+      path: "store",
+      select: "storePercentage adminCutPercentage name"
+    }
+  });
   // Filter out items where product is null (deleted or inactive)
   return {
     items: cart.items.filter((it) => it.product != null).map((it) => {
+      const storePercentage = it.product.store?.storePercentage || 0;
+      const markupPrice = (val) => val != null ? Number((val * (1 + storePercentage / 100)).toFixed(2)) : val;
+
       const base = {
         productId: it.product._id.toString(),
         quantity: it.quantity,
         bulkDiscountQuantity: it.product.bulkDiscountQuantity || 0,
         bulkDiscountPriceReduction: it.product.bulkDiscountPriceReduction || 0,
         bulkTiers: it.product.bulkTiers || [],
-        mrp: it.product.mrp || it.product.price,
+        mrp: markupPrice(it.product.mrp || it.product.price),
         packSize: it.product.packSize || 1,
         originalStorePrice: it.product.originalStorePrice || it.product.price || 0,
-        storePercentage: it.product.store?.storePercentage || 0
+        storePercentage: storePercentage
       };
       if (it.variantSku) {
         const v = (it.product.variants || []).find(v => v.sku === it.variantSku);
         if (v) {
+          const vPrice = markupPrice(v.price ?? it.product.price);
+          const vMrp = markupPrice(v.mrp ?? v.price ?? it.product.mrp ?? it.product.price);
           return {
             ...base,
             variantSku: it.variantSku,
             name: it.product.name,
             attributes: v.attributes,
-            price: v.price ?? it.product.price,
+            price: vPrice,
+            mrp: vMrp,
             originalStorePrice: v.originalStorePrice ?? v.price ?? it.product.originalStorePrice ?? it.product.price,
             gst: it.product.gst || 0,
             stock: v.stock ?? 0,
@@ -45,7 +58,7 @@ const serializeCart = async (cart) => {
       return {
         ...base,
         name: it.product.name,
-        price: it.product.price,
+        price: markupPrice(it.product.price),
         gst: it.product.gst || 0,
         stock: it.product.stock,
         image: it.product.images?.[0]?.url || "",

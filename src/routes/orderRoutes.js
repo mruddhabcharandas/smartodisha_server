@@ -163,8 +163,25 @@ router.post("/", auth, requireRole("customer"), async (req, res) => {
   if (!cust) return res.status(404).json({ error: "customer_not_found" });
 
   const ids = items.map((x) => x.productId);
-  const products = await Product.find({ _id: { $in: ids }, isActive: true });
+  const products = await Product.find({ _id: { $in: ids }, isActive: true }).populate('store');
   if (products.length !== ids.length) return res.status(400).json({ error: "product_not_found" });
+
+  // Apply store percentage markup to product prices inside the products array before totals and stock validation
+  for (const p of products) {
+    const storePercentage = p.store?.storePercentage || 0;
+    p.price = Number((p.price * (1 + storePercentage / 100)).toFixed(2));
+    if (p.mrp != null) {
+      p.mrp = Number((p.mrp * (1 + storePercentage / 100)).toFixed(2));
+    }
+    if (p.variants && p.variants.length > 0) {
+      for (const v of p.variants) {
+        v.price = Number((v.price * (1 + storePercentage / 100)).toFixed(2));
+        if (v.mrp != null) {
+          v.mrp = Number((v.mrp * (1 + storePercentage / 100)).toFixed(2));
+        }
+      }
+    }
+  }
 
   for (const it of items) {
     const p = products.find(x => x._id.toString() === it.productId);
@@ -189,6 +206,23 @@ router.post("/", auth, requireRole("customer"), async (req, res) => {
   }
 
   const { discount: coupDiscount, finalAmount: payableTotal, couponId } = await validateAndApplyCoupon(couponCode, totals.total);
+
+  // Get store from first product (assuming all products from same store for now)
+  const store = products[0]?.store;
+
+  // Calculate base revenue (originalStorePrice total)
+  let baseTotal = 0;
+  for (const it of items) {
+    const p = products.find(x => x._id.toString() === it.productId);
+    const v = it.variantSku ? (p?.variants || []).find(v => v.sku === String(it.variantSku)) : null;
+    const basePrice = v ? (v.originalStorePrice || v.price || 0) : (p?.originalStorePrice || p?.price || 0);
+    baseTotal += basePrice * it.quantity;
+  }
+
+  // Calculate admin cut and store revenue
+  const adminCutPercent = store?.adminCutPercentage || 5;
+  const storeRevenue = baseTotal * (1 - adminCutPercent / 100);
+  const adminRevenue = payableTotal - storeRevenue;
 
   const orderItems = totals.items.map((it) => {
     const p = products.find(x => x._id.toString() === it.product.toString());
@@ -256,7 +290,10 @@ router.post("/", auth, requireRole("customer"), async (req, res) => {
     cashfreeOrderId: cashfreeOrder?.order_id || cashfreeOrderId || "",
     cashfreePaymentId: cashfreePaymentId || "",
     cashfreeSignature: cashfreeSignature || "",
-    notes: notes || ""
+    notes: notes || "",
+    store: store?._id || null,
+    storeRevenue: Number(storeRevenue.toFixed(2)),
+    adminRevenue: Number(adminRevenue.toFixed(2))
   });
 
   if (couponId) {
@@ -423,14 +460,33 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
       const basePrice = v ? (v.originalStorePrice || v.price || 0) : (p?.originalStorePrice || p?.price || 0);
       baseTotal += basePrice * it.quantity;
     }
+
+    // Apply store percentage markup to product prices inside the products array before totals and stock validation
+    for (const p of products) {
+      const storePercentage = p.store?.storePercentage || 0;
+      p.price = Number((p.price * (1 + storePercentage / 100)).toFixed(2));
+      if (p.mrp != null) {
+        p.mrp = Number((p.mrp * (1 + storePercentage / 100)).toFixed(2));
+      }
+      if (p.variants && p.variants.length > 0) {
+        for (const v of p.variants) {
+          v.price = Number((v.price * (1 + storePercentage / 100)).toFixed(2));
+          if (v.mrp != null) {
+            v.mrp = Number((v.mrp * (1 + storePercentage / 100)).toFixed(2));
+          }
+        }
+      }
+    }
     
     // Calculate admin cut and store revenue
     const adminCutPercent = store?.adminCutPercentage || 5;
-    const adminRevenue = (baseTotal * adminCutPercent) / 100;
-    const storeRevenue = baseTotal - adminRevenue;
+    const storeRevenue = baseTotal * (1 - adminCutPercent / 100);
     
     const totals = computeTotals(products, items);
     const { discount: coupDiscount, finalAmount: payableTotal, couponId } = await validateAndApplyCoupon(couponCode, totals.total);
+    
+    const actualTotal = paymentMethod === "COD" ? (totalAmount || payableTotal) : payableTotal;
+    const adminRevenue = actualTotal - storeRevenue;
     
     for (const it of items) {
       const p = products.find(x => x._id.toString() === it.productId);

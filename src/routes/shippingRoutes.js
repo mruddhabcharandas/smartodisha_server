@@ -253,11 +253,13 @@ router.get("/eta", async (req, res) => {
   const dest = String(req.query.dest || "").trim();
   if (!dest) return res.status(400).json({ error: "missing_params" });
   try {
-    const response = await shiprocket.post("/courier/serviceability", {
-      pickup_postcode: origin,
-      delivery_postcode: dest,
-      weight: 0.5,
-      cod: 0
+    const response = await shiprocket.get("/courier/serviceability", {
+      params: {
+        pickup_postcode: origin,
+        delivery_postcode: dest,
+        weight: 0.5,
+        cod: 0
+      }
     });
     const data = response.data;
     const now = new Date();
@@ -367,11 +369,13 @@ router.post("/shiprocket/create", auth, requirePermission("orders"), async (req,
     // First check serviceability to get best courier
     let selectedCourierId = null;
     try {
-      const serviceability = await client.post("/courier/serviceability", {
-        pickup_postcode: pickupAddress.pincode,
-        delivery_postcode: addr.pincode,
-        weight: weightKg,
-        cod: 0
+      const serviceability = await client.get("/courier/serviceability", {
+        params: {
+          pickup_postcode: pickupAddress.pincode,
+          delivery_postcode: addr.pincode,
+          weight: weightKg,
+          cod: 0
+        }
       });
       
       if (serviceability.data?.data?.couriers || Array.isArray(serviceability.data?.couriers)) {

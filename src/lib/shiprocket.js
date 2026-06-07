@@ -82,7 +82,7 @@ export const checkServiceability = async (params, credentials = {}) => {
     throw new Error("missing_postcodes");
   }
 
-  return client.post("/courier/serviceability", payload);
+  return client.get("/courier/serviceability", { params: payload });
 };
 
 export default defaultClient;
