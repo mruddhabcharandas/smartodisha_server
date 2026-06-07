@@ -409,23 +409,18 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
         }
       }
       
-      const store = products[0]?.store;
-      let pickupPincode = process.env.SHIPROCKET_PICKUP_PINCODE || "360001";
-      if (store?.pickupAddress?.pincode) {
-        pickupPincode = store.pickupAddress.pincode;
+      const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
+      const isPrepaidFree = payableProductTotal >= freeDeliveryAbove && paymentMethod === 'CASHFREE';
+      const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
+      const perKg = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
+      const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
+      const weight = totalWeightGrams > 0 ? totalWeightGrams / 1000 : 0.5;
+      const variable = perKg * weight;
+      const baseAmt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
+      shippingCost = isPrepaidFree ? 0 : baseAmt;
+      if (paymentMethod === "COD") {
+        codCharge = Math.min(Math.max(Math.round(payableProductTotal * 0.05), 40), 100);
       }
-      
-      const response = await axios.post("http://localhost:5000/api/shipping/calculate", {
-        store_id: store?._id,
-        source_pin: pickupPincode,
-        destination_pin: deliveryAddress.pincode,
-        weight: totalWeightGrams,
-        order_amount: payableProductTotal,
-        payment_method: paymentMethod.toLowerCase()
-      });
-      
-      shippingCost = response.data.delivery_charge || 0;
-      codCharge = response.data.cod_charge || 0;
     } catch (e) {
       console.error("Shipping calculation failed, using default:", e.message);
       const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
@@ -678,7 +673,7 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
         subheading: paymentMethod === "COD" 
           ? "Your COD order has been confirmed. 15% advance received." 
           : "We’ve confirmed your payment and are preparing your shipment.",
-        highlight: `Order ID: ${doc._id}`,
+        highlight: `Order ID: ${doc.orderNumber}`,
         blocks: [
           { label: "Payment Method", value: paymentMethod },
           { label: "Amount Paid", value: `₹${Number(paymentMethod === "COD" ? Math.round(finalTotal * 0.15 * 100) / 100 : doc.totalEstimate).toLocaleString("en-IN")}` },
@@ -691,7 +686,7 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
 
     try { await tryCreateShiprocketShipment(doc); } catch {}
 
-    return res.json({ success: true, orderId: doc._id });
+    return res.json({ success: true, orderId: doc._id, orderNumber: doc.orderNumber });
   } catch (e) {
     console.error("Create after verify error:", e);
     return res.status(500).json({ error: "order_create_failed" });
