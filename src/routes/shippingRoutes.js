@@ -181,7 +181,7 @@ router.post("/calculate", async (req, res) => {
       || 85
     );
     const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
-    const isFree = order_amount >= freeDeliveryAbove;
+    const isFree = payment_method === "prepaid" || order_amount >= freeDeliveryAbove;
     const discount = isFree ? amt : 0;
     let final = isFree ? 0 : amt;
     // COD charge: REMOVED as per user request
@@ -211,7 +211,7 @@ router.post("/calculate", async (req, res) => {
     const variable = perKg * weight;
     const amt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
     const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
-    const isFree = order_amount >= freeDeliveryAbove;
+    const isFree = payment_method === "prepaid" || order_amount >= freeDeliveryAbove;
     const discount = isFree ? amt : 0;
     let final = isFree ? 0 : amt;
     // COD charge: REMOVED as per user request
