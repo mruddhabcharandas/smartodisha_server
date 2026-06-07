@@ -753,20 +753,7 @@ router.get("/my", auth, requireRole("customer"), async (req, res) => {
   res.json(items);
 });
 
-// Get orders for a specific store (seller)
-router.get("/store", auth, async (req, res) => {
-  try {
-    // Get store ID from user (assuming user has a store reference or we fetch store by user ID)
-    // For now, assuming req.user has storeId or we get store from user
-    const stores = await Store.find({ owner: req.user.id }).select("_id");
-    const storeIds = stores.map(s => s._id);
-    const items = await Order.find({ store: { $in: storeIds } }).sort({ createdAt: -1 });
-    res.json(items);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "failed to load store orders" });
-  }
-});
+
 
 router.get("/", auth, requirePermission("orders"), async (req, res) => {
   const status = req.query.status;
