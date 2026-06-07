@@ -31,18 +31,22 @@ const validateAndApplyCoupon = async (code, amount) => {
   const now = new Date();
   if (c.expiryDate && c.expiryDate < now) return { discount: 0, finalAmount: amount };
   if (c.usageLimit > 0 && c.usedCount >= c.usageLimit) return { discount: 0, finalAmount: amount };
-  if (amount < (c.minAmount || 0)) return { discount: 0, finalAmount: amount };
+  if (amount < (c.minAmount || c.minOrderValue || 0)) return { discount: 0, finalAmount: amount };
 
   let discount = 0;
   if (c.type === "PERCENT") discount = (amount * c.value) / 100;
   else if (c.type === "FLAT") discount = c.value;
 
+  if (c.maxDiscount > 0 && discount > c.maxDiscount) {
+    discount = c.maxDiscount;
+  }
   if (discount > amount) discount = amount;
   discount = Number(discount.toFixed(2));
   return { discount, finalAmount: Number((amount - discount).toFixed(2)), couponId: c._id };
 };
 
 const tryCreateShiprocketShipment = async (order) => {
+  console.log('=== Trying to create Shiprocket shipment for order:', order._id.toString());
   try {
     if (!process.env.SHIPROCKET_EMAIL || !process.env.SHIPROCKET_PASSWORD || !process.env.SHIPROCKET_PICKUP_PINCODE) {
       console.log("Shiprocket not configured, skipping shipment creation");
@@ -438,9 +442,9 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
     const cashfreeMode = isSandbox ? "sandbox" : "production";
 
     if (paymentMethod === "COD") {
-      // COD requires 15% advance on total amount
-      const advanceAmount = Math.round(totalPayable * 0.15 * 100) / 100;
-      const codDueAmount = Math.round(totalPayable * 0.85 * 100) / 100;
+      // COD requires 15% advance on total amount (rounded to whole number for payment)
+      const advanceAmount = Math.round(totalPayable * 0.15); // Round to whole number
+      const codDueAmount = totalPayable - advanceAmount; // Remaining on delivery
       
       if (!process.env.CASHFREE_APP_ID || !process.env.CASHFREE_SECRET_KEY) {
         return res.status(500).json({ error: "cashfree_not_configured" });
@@ -505,6 +509,9 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
 
 // Create Order after payment verification (new flow)
 router.post("/create-after-verify", auth, requireRole("customer"), async (req, res) => {
+  console.log('=== create-after-verify API called ===');
+  console.log('Request body:', JSON.stringify(req.body, null, 2));
+  
   const { cashfreeOrderId, cashfreePaymentId, cashfreeSignature, items, paymentMethod, notes, couponCode, deliveryAddress, totalAmount, codDueAmount, productTotal, shippingCost, codCharge } = req.body || {};
   if (!["CASHFREE", "COD"].includes(paymentMethod)) return res.status(400).json({ error: "invalid_payment_method" });
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "no_items" });
@@ -603,6 +610,7 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
       pincode: cust.kyc?.pincode || ""
     };
 
+    console.log('Creating order with finalTotal:', finalTotal);
     const doc = await Order.create({
       customer: { name: cust.name, phone: cust.phone, email: cust.email || "" },
       shippingAddress,
@@ -619,12 +627,13 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
       cashfreeOrderId,
       cashfreePaymentId,
       cashfreeSignature,
-      codDueAmount: paymentMethod === "COD" ? (codDueAmount || Math.round(finalTotal * 0.85 * 100) / 100) : 0,
+      codDueAmount: paymentMethod === "COD" ? (codDueAmount || Math.round(finalTotal * 0.85)) : 0,
       notes: notes || "",
       store: store?._id || null,
       storeRevenue: Number(storeRevenue.toFixed(2)),
       adminRevenue: Number(adminRevenue.toFixed(2))
     });
+    console.log('Order created successfully! Order ID:', doc._id.toString(), 'Order Number:', doc.orderNumber);
 
     if (couponId) {
       await Coupon.findByIdAndUpdate(couponId, { $inc: { usedCount: 1 } });
