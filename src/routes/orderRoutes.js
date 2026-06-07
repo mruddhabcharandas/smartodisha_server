@@ -367,8 +367,26 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
     const nameVal = (defaultAddr && defaultAddr.fullName) || cust.name || "Customer";
 
     const uniqueIds = [...new Set(items.map((x) => x.productId))];
-    const products = await Product.find({ _id: { $in: uniqueIds }, isActive: true });
+    const products = await Product.find({ _id: { $in: uniqueIds }, isActive: true }).populate('store');
     if (products.length !== uniqueIds.length) return res.status(400).json({ error: "product_not_found" });
+
+    // Apply store percentage markup to product prices
+    for (const p of products) {
+      const storePercentage = p.store?.storePercentage || 0;
+      p.price = Number((p.price * (1 + storePercentage / 100)).toFixed(2));
+      if (p.mrp != null) {
+        p.mrp = Number((p.mrp * (1 + storePercentage / 100)).toFixed(2));
+      }
+      if (p.variants && p.variants.length > 0) {
+        for (const v of p.variants) {
+          v.price = Number((v.price * (1 + storePercentage / 100)).toFixed(2));
+          if (v.mrp != null) {
+            v.mrp = Number((v.mrp * (1 + storePercentage / 100)).toFixed(2));
+          }
+        }
+      }
+    }
+
     const totals = computeTotals(products, items);
     const minAmount = Number(process.env.MIN_ORDER_AMOUNT || 5000);
     if (totals.total < minAmount) return res.status(400).json({ error: "min_order_not_met", minAmount });
@@ -733,6 +751,21 @@ router.get("/my", auth, requireRole("customer"), async (req, res) => {
   if (!cust) return res.status(404).json({ error: "not_found" });
   const items = await Order.find({ "customer.phone": cust.phone }).sort({ createdAt: -1 });
   res.json(items);
+});
+
+// Get orders for a specific store (seller)
+router.get("/store", auth, async (req, res) => {
+  try {
+    // Get store ID from user (assuming user has a store reference or we fetch store by user ID)
+    // For now, assuming req.user has storeId or we get store from user
+    const stores = await Store.find({ owner: req.user.id }).select("_id");
+    const storeIds = stores.map(s => s._id);
+    const items = await Order.find({ store: { $in: storeIds } }).sort({ createdAt: -1 });
+    res.json(items);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "failed to load store orders" });
+  }
 });
 
 router.get("/", auth, requirePermission("orders"), async (req, res) => {
