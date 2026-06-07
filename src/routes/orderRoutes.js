@@ -18,7 +18,7 @@ import { createBillFromData } from "../lib/billing.js";
 import { sendEmail, renderMail } from "../lib/mailer.js";
 import AuditLog from "../models/AuditLog.js";
 import { notifyAdmin } from "../lib/socket.js";
-import shiprocket from "../lib/shiprocket.js";
+import shiprocket, { checkServiceability, createShiprocketClient } from "../lib/shiprocket.js";
 
 const router = express.Router();
 
@@ -48,10 +48,36 @@ const validateAndApplyCoupon = async (code, amount) => {
 const tryCreateShiprocketShipment = async (order) => {
   console.log('=== Trying to create Shiprocket shipment for order:', order._id.toString());
   try {
-    if (!process.env.SHIPROCKET_EMAIL || !process.env.SHIPROCKET_PASSWORD || !process.env.SHIPROCKET_PICKUP_PINCODE) {
-      console.log("Shiprocket not configured, skipping shipment creation");
+    const productIds = (order.items || []).map(it => it.product);
+    const products = await Product.find({ _id: { $in: productIds } });
+    const storeId = products[0]?.store;
+    
+    let srEmail = process.env.SHIPROCKET_EMAIL;
+    let srPassword = process.env.SHIPROCKET_PASSWORD;
+    let pickupPincode = process.env.SHIPROCKET_PICKUP_PINCODE || "360001";
+    let pickupLocation = process.env.SHIPROCKET_PICKUP_NAME || "Warehouse";
+    
+    if (storeId) {
+      const storeObj = await Store.findById(storeId).select("shiprocketEmail shiprocketPassword pickupAddress pickupName");
+      if (storeObj) {
+        if (storeObj.shiprocketEmail && storeObj.shiprocketPassword) {
+          srEmail = storeObj.shiprocketEmail;
+          srPassword = storeObj.shiprocketPassword;
+        }
+        if (storeObj.pickupAddress?.pincode) {
+          pickupPincode = storeObj.pickupAddress.pincode;
+        }
+        if (storeObj.pickupName) {
+          pickupLocation = storeObj.pickupName;
+        }
+      }
+    }
+    
+    if (!srEmail || !srPassword) {
+      console.log("Shiprocket not configured for store or system, skipping shipment creation");
       return null;
     }
+
     let addr = order.shippingAddress || {};
     if (!addr.pincode || !addr.line1) {
       const cust = await Customer.findOne({ phone: order.customer.phone });
@@ -87,9 +113,6 @@ const tryCreateShiprocketShipment = async (order) => {
       return null;
     }
 
-    const productIds = (order.items || []).map(it => it.product);
-    const products = await Product.find({ _id: { $in: productIds } });
-
     let totalWeightGrams = 0;
     const orderItems = (order.items || []).map(it => {
       const p = products.find(prod => prod._id.toString() === it.product.toString());
@@ -113,7 +136,7 @@ const tryCreateShiprocketShipment = async (order) => {
     const shipment = {
       order_id: order._id.toString(),
       order_date: new Date().toISOString().split('T')[0],
-      pickup_location: process.env.SHIPROCKET_PICKUP_NAME || "Warehouse",
+      pickup_location: pickupLocation,
       billing_customer_name: order.customer.name,
       billing_last_name: "",
       billing_address: addr.line1,
@@ -138,7 +161,8 @@ const tryCreateShiprocketShipment = async (order) => {
       weight: weightKg
     };
 
-    const { data } = await shiprocket.post("/orders/create/adhoc", shipment);
+    const client = createShiprocketClient({ email: srEmail, password: srPassword });
+    const { data } = await client.post("/orders/create/adhoc", shipment);
 
     console.log("Shiprocket order created:", data);
     const shipmentId = data.shipment_id;
@@ -413,14 +437,90 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
         }
       }
       
+      const storeId = products[0]?.store?._id || products[0]?.store;
+      
+      // Let's get store credentials and pickup postcode
+      let origin = process.env.SHIPROCKET_PICKUP_PINCODE || "360001";
+      let srEmail = process.env.SHIPROCKET_EMAIL;
+      let srPassword = process.env.SHIPROCKET_PASSWORD;
+      
+      if (storeId) {
+        const storeObj = await Store.findById(storeId).select("shiprocketEmail shiprocketPassword pickupAddress");
+        if (storeObj) {
+          if (storeObj.shiprocketEmail && storeObj.shiprocketPassword) {
+            srEmail = storeObj.shiprocketEmail;
+            srPassword = storeObj.shiprocketPassword;
+          }
+          if (storeObj.pickupAddress?.pincode) {
+            origin = storeObj.pickupAddress.pincode;
+          }
+        }
+      }
+      
+      const dest = deliveryAddress?.pincode || (cust.savedAddresses || []).find(a => a.isDefault)?.pincode || cust.kyc?.pincode;
+      const weight = totalWeightGrams > 0 ? totalWeightGrams / 1000 : 0.5;
+      
+      let baseAmt = 85;
+      if (dest) {
+        try {
+          const response = await checkServiceability({
+            pickup_postcode: origin,
+            delivery_postcode: dest,
+            weight,
+            cod: paymentMethod === "COD"
+          }, { email: srEmail, password: srPassword });
+          const serviceabilityData = response.data;
+          
+          let selectedCourier = null;
+          const courierList = serviceabilityData?.data?.available_courier_companies
+            || serviceabilityData?.data?.couriers
+            || serviceabilityData?.couriers
+            || [];
+          
+          const findBestCourierLocal = (couriers) => {
+            if (!Array.isArray(couriers)) return null;
+            const delhivery = couriers.find(c => 
+              String(c.name || c.courier_name || c.courier || '').toLowerCase().includes('delhivery')
+            );
+            if (delhivery) return delhivery;
+            const blueDart = couriers.find(c => 
+              String(c.name || c.courier_name || c.courier || '').toLowerCase().includes('blue dart') ||
+              String(c.name || c.courier_name || c.courier || '').toLowerCase().includes('bluedart')
+            );
+            if (blueDart) return blueDart;
+            return couriers[0];
+          };
+          
+          if (Array.isArray(courierList) && courierList.length) {
+            selectedCourier = findBestCourierLocal(courierList);
+          }
+          
+          baseAmt = Number(
+            selectedCourier?.rate
+            || selectedCourier?.freight_charge
+            || serviceabilityData?.data?.available_courier_companies?.[0]?.rate
+            || serviceabilityData?.rate
+            || process.env.SHIPPING_BASE_CHARGE
+            || 85
+          );
+        } catch (err) {
+          console.error("prepare-payment Shiprocket serviceability error:", err.message);
+          const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
+          const perKg = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
+          const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
+          const variable = perKg * weight;
+          baseAmt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
+        }
+      } else {
+        const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
+        const perKg = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
+        const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
+        const variable = perKg * weight;
+        baseAmt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
+      }
+      
       const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
       const isPrepaidFree = payableProductTotal >= freeDeliveryAbove && paymentMethod === 'CASHFREE';
-      const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
-      const perKg = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
-      const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
-      const weight = totalWeightGrams > 0 ? totalWeightGrams / 1000 : 0.5;
-      const variable = perKg * weight;
-      const baseAmt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
       shippingCost = isPrepaidFree ? 0 : baseAmt;
       if (paymentMethod === "COD") {
         codCharge = Math.min(Math.max(Math.round(payableProductTotal * 0.05), 40), 100);
@@ -853,13 +953,14 @@ router.post("/:id/cancel", auth, requirePermission("orders"), async (req, res) =
       return res.status(400).json({ error: "cannot_cancel_shipped_order" });
     }
     
-    if (order.paymentStatus !== "PAID" || order.paymentMethod !== "CASHFREE") {
+    if (order.paymentStatus !== "PAID" || !["CASHFREE", "COD"].includes(order.paymentMethod)) {
       return res.status(400).json({ error: "cannot_cancel_unpaid_order" });
     }
     
-    // Calculate refund amount (95% of total)
-    const refundAmount = Math.max(0, Math.round((order.totalEstimate * 0.95) * 100) / 100);
-    const deductionAmount = order.totalEstimate - refundAmount;
+    // Calculate refund amount based on amount actually paid
+    const amountPaid = order.paymentMethod === "COD" ? (order.totalEstimate - order.codDueAmount) : order.totalEstimate;
+    const refundAmount = Math.max(0, Math.round((amountPaid * 0.95) * 100) / 100);
+    const deductionAmount = amountPaid - refundAmount;
     
     // Restore stock
     for (const item of order.items) {
@@ -945,6 +1046,273 @@ router.post("/:id/cancel", auth, requirePermission("orders"), async (req, res) =
   } catch (e) {
     console.error("Cancel order error:", e);
     res.status(500).json({ error: "cancel_failed", message: e.message });
+  }
+});
+
+// Customer-side order cancellation
+router.post("/:id/cancel-customer", auth, requireRole("customer"), async (req, res) => {
+  const { reason } = req.body || {};
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  
+  try {
+    const cust = await Customer.findById(req.user.id).select("phone");
+    if (!cust) return res.status(404).json({ error: "customer_not_found" });
+
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    // Ensure the order belongs to this customer
+    if (order.customer.phone !== cust.phone) {
+      return res.status(403).json({ error: "forbidden" });
+    }
+
+    // Check if order can be cancelled
+    if (["CANCELLED", "RETURNED", "SHIPPED", "OUT_FOR_DELIVERY", "DELIVERED", "FULFILLED"].includes(order.status)) {
+      return res.status(400).json({ error: "cannot_cancel_shipped_order" });
+    }
+
+    if (order.shipping?.waybill || order.shiprocketOrderId || order.shiprocketAwbNumber) {
+      return res.status(400).json({ error: "cannot_cancel_shipped_order" });
+    }
+
+    // Restore stock
+    for (const item of order.items) {
+      const qty = item.quantity;
+      if (item.variantSku) {
+        await Product.updateOne(
+          { _id: item.product, "variants.sku": item.variantSku },
+          { $inc: { "variants.$.stock": qty } }
+        );
+      } else {
+        await Product.updateOne(
+          { _id: item.product },
+          { $inc: { stock: qty } }
+        );
+      }
+    }
+    
+    // Update product stock summary
+    const productIds = order.items.map(i => i.product.toString());
+    for (const id of productIds) {
+      const p = await Product.findById(id);
+      if (p && p.variants && p.variants.length > 0) {
+        const sum = p.variants.filter(v => v.isActive !== false).reduce((s, v) => s + (v.stock || 0), 0);
+        p.stock = sum;
+        await p.save();
+      }
+    }
+
+    order.status = "CANCELLED";
+    
+    // If order was paid via Cashfree, initiate refund of paid amount
+    const amountPaid = order.paymentStatus === "PAID" && ["CASHFREE", "COD"].includes(order.paymentMethod)
+      ? (order.paymentMethod === "COD" ? (order.totalEstimate - order.codDueAmount) : order.totalEstimate)
+      : 0;
+
+    if (amountPaid > 0 && order.cashfreeOrderId) {
+      const refundAmount = Math.max(0, Math.round((amountPaid * 0.95) * 100) / 100);
+      const deductionAmount = amountPaid - refundAmount;
+      
+      order.refundAmount = refundAmount;
+      order.refundReason = reason || "Cancelled by customer";
+      order.refundStatus = "PENDING";
+      
+      try {
+        const refundPayload = {
+          refund_id: `refund_${order._id.toString()}_${Date.now()}`,
+          refund_amount: refundAmount,
+          refund_note: reason || "Cancelled by customer",
+          refund_speed: "STANDARD"
+        };
+        
+        const { data } = await cashfree.post(
+          `/pg/orders/${order.cashfreeOrderId}/refunds`,
+          refundPayload
+        );
+        
+        order.refundId = data.refund_id;
+      } catch (cashfreeErr) {
+        console.error("Cashfree customer refund failed:", cashfreeErr.response?.data || cashfreeErr.message);
+        order.refundStatus = "FAILED";
+        await order.save();
+        
+        return res.status(500).json({
+          error: "order_cancelled_but_refund_failed",
+          message: "Order has been cancelled, but refund failed. Please contact support.",
+          order
+        });
+      }
+    }
+
+    await order.save();
+    
+    // Log audit
+    await AuditLog.create({
+      actorId: req.user.id,
+      actorRole: "customer",
+      type: "ORDER_CANCEL",
+      entityType: "ORDER",
+      entityId: order._id.toString(),
+      note: `Order cancelled by customer. Reason: ${reason || "None"}`
+    });
+
+    res.json({
+      success: true,
+      message: "Order cancelled successfully",
+      order
+    });
+  } catch (e) {
+    console.error("Cancel customer order error:", e);
+    res.status(500).json({ error: "cancel_failed", message: e.message });
+  }
+});
+
+// Admin status patch
+router.patch("/:id/status", auth, requirePermission("orders"), async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "not_found" });
+
+    order.status = req.body.status;
+    if (["DELIVERED", "FULFILLED"].includes(req.body.status)) {
+      order.paymentStatus = "PAID";
+      try {
+        await createBillFromData({
+          customerData: { phone: order.customer.phone, name: order.customer.name, email: order.customer.email },
+          items: order.items.map(it => ({ product: it.product, variantSku: it.variantSku || undefined, quantity: it.quantity })),
+          paymentType: order.paymentMethod,
+          existingOrderId: order._id
+        });
+      } catch (err) {}
+    }
+    await order.save();
+    
+    await AuditLog.create({
+      actorId: req.user.id,
+      actorRole: req.user.role,
+      type: "ORDER_STATUS",
+      entityType: "ORDER",
+      entityId: order._id.toString(),
+      note: `Status updated to ${req.body.status}`
+    });
+
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ error: "status_update_failed" });
+  }
+});
+
+// Admin pack order patch
+router.patch("/:id/pack", auth, requirePermission("orders"), async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "not_found" });
+
+    order.status = "PACKED";
+    await order.save();
+
+    await AuditLog.create({
+      actorId: req.user.id,
+      actorRole: req.user.role,
+      type: "ORDER_STATUS",
+      entityType: "ORDER",
+      entityId: order._id.toString(),
+      note: "Order marked as Packed"
+    });
+
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ error: "pack_failed" });
+  }
+});
+
+// Admin deliver order patch
+router.patch("/:id/deliver", auth, requirePermission("orders"), async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "not_found" });
+
+    order.status = "DELIVERED";
+    order.paymentStatus = "PAID";
+    await order.save();
+
+    try {
+      await createBillFromData({
+        customerData: { phone: order.customer.phone, name: order.customer.name, email: order.customer.email },
+        items: order.items.map(it => ({ product: it.product, variantSku: it.variantSku || undefined, quantity: it.quantity })),
+        paymentType: order.paymentMethod,
+        existingOrderId: order._id
+      });
+    } catch (err) {}
+
+    await AuditLog.create({
+      actorId: req.user.id,
+      actorRole: req.user.role,
+      type: "ORDER_STATUS",
+      entityType: "ORDER",
+      entityId: order._id.toString(),
+      note: "Order marked as Delivered"
+    });
+
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ error: "deliver_failed" });
+  }
+});
+
+// Admin finalize COD
+router.patch("/:id/finalize-cod", auth, requirePermission("orders"), async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "not_found" });
+
+    order.paymentStatus = "PAID";
+    order.status = "DELIVERED";
+    await order.save();
+
+    try {
+      await createBillFromData({
+        customerData: { phone: order.customer.phone, name: order.customer.name, email: order.customer.email },
+        items: order.items.map(it => ({ product: it.product, variantSku: it.variantSku || undefined, quantity: it.quantity })),
+        paymentType: order.paymentMethod,
+        existingOrderId: order._id
+      });
+    } catch (err) {}
+
+    await AuditLog.create({
+      actorId: req.user.id,
+      actorRole: req.user.role,
+      type: "ORDER_STATUS",
+      entityType: "ORDER",
+      entityId: order._id.toString(),
+      note: "COD finalized and marked Delivered"
+    });
+
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ error: "finalize_cod_failed" });
+  }
+});
+
+// Admin standard delhivery shipment map to shiprocket
+router.post("/:id/delhivery/standard-shipment", auth, requirePermission("orders"), async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "not_found" });
+
+    const updated = await tryCreateShiprocketShipment(order);
+    if (updated && updated.shipping?.waybill) {
+      res.json({ success: true, waybill: updated.shipping.waybill });
+    } else {
+      res.status(400).json({ error: "shipment_creation_failed", message: "Failed to create Shiprocket shipment. Please verify pincodes or configuration." });
+    }
+  } catch (err) {
+    res.status(500).json({ error: "shipment_creation_failed", message: err.message });
   }
 });
 

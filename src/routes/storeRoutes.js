@@ -289,6 +289,365 @@ router.get("/orders", protect, async (req, res) => {
   }
 });
 
+// Update order status (seller)
+router.patch("/orders/:id/status", protect, async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  try {
+    const order = await Order.findOne({ _id: req.params.id, store: req.store._id });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    order.status = req.body.status;
+    if (["DELIVERED", "FULFILLED"].includes(req.body.status)) {
+      order.paymentStatus = "PAID";
+      try {
+        const { createBillFromData } = await import("../lib/billing.js");
+        await createBillFromData({
+          customerData: { phone: order.customer.phone, name: order.customer.name, email: order.customer.email },
+          items: order.items.map(it => ({ product: it.product, variantSku: it.variantSku || undefined, quantity: it.quantity })),
+          paymentType: order.paymentMethod,
+          existingOrderId: order._id
+        });
+      } catch (err) {}
+    }
+    await order.save();
+
+    await AuditLog.create({
+      actorId: req.store._id,
+      actorRole: "store",
+      type: "ORDER_STATUS",
+      entityType: "ORDER",
+      entityId: order._id.toString(),
+      note: `Status updated by store to ${req.body.status}`
+    });
+
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ error: "status_update_failed" });
+  }
+});
+
+// Mark order as Packed (seller)
+router.patch("/orders/:id/pack", protect, async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  try {
+    const order = await Order.findOne({ _id: req.params.id, store: req.store._id });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    order.status = "PACKED";
+    await order.save();
+
+    await AuditLog.create({
+      actorId: req.store._id,
+      actorRole: "store",
+      type: "ORDER_STATUS",
+      entityType: "ORDER",
+      entityId: order._id.toString(),
+      note: "Order marked Packed by store"
+    });
+
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ error: "pack_failed" });
+  }
+});
+
+// Mark order as Delivered (seller)
+router.patch("/orders/:id/deliver", protect, async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  try {
+    const order = await Order.findOne({ _id: req.params.id, store: req.store._id });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    order.status = "DELIVERED";
+    order.paymentStatus = "PAID";
+    await order.save();
+
+    try {
+      const { createBillFromData } = await import("../lib/billing.js");
+      await createBillFromData({
+        customerData: { phone: order.customer.phone, name: order.customer.name, email: order.customer.email },
+        items: order.items.map(it => ({ product: it.product, variantSku: it.variantSku || undefined, quantity: it.quantity })),
+        paymentType: order.paymentMethod,
+        existingOrderId: order._id
+      });
+    } catch (err) {}
+
+    await AuditLog.create({
+      actorId: req.store._id,
+      actorRole: "store",
+      type: "ORDER_STATUS",
+      entityType: "ORDER",
+      entityId: order._id.toString(),
+      note: "Order marked Delivered by store"
+    });
+
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ error: "deliver_failed" });
+  }
+});
+
+// Cancel Order (seller)
+router.post("/orders/:id/cancel", protect, async (req, res) => {
+  const { reason } = req.body || {};
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+
+  try {
+    const order = await Order.findOne({ _id: req.params.id, store: req.store._id });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    if (["CANCELLED", "RETURNED", "SHIPPED", "OUT_FOR_DELIVERY", "DELIVERED", "FULFILLED"].includes(order.status)) {
+      return res.status(400).json({ error: "cannot_cancel_shipped_order" });
+    }
+
+    // Restore stock
+    for (const item of order.items) {
+      const qty = item.quantity;
+      if (item.variantSku) {
+        await Product.updateOne(
+          { _id: item.product, "variants.sku": item.variantSku },
+          { $inc: { "variants.$.stock": qty } }
+        );
+      } else {
+        await Product.updateOne(
+          { _id: item.product },
+          { $inc: { stock: qty } }
+        );
+      }
+    }
+
+    // Update product stock summary
+    const productIds = order.items.map(i => i.product.toString());
+    for (const id of productIds) {
+      const p = await Product.findById(id);
+      if (p && p.variants && p.variants.length > 0) {
+        const sum = p.variants.filter(v => v.isActive !== false).reduce((s, v) => s + (v.stock || 0), 0);
+        p.stock = sum;
+        await p.save();
+      }
+    }
+
+    order.status = "CANCELLED";
+
+    // Initiate Cashfree refund if order was paid online
+    const amountPaid = order.paymentStatus === "PAID" && ["CASHFREE", "COD"].includes(order.paymentMethod)
+      ? (order.paymentMethod === "COD" ? (order.totalEstimate - order.codDueAmount) : order.totalEstimate)
+      : 0;
+
+    if (amountPaid > 0 && order.cashfreeOrderId) {
+      const refundAmount = Math.max(0, Math.round((amountPaid * 0.95) * 100) / 100);
+      const deductionAmount = amountPaid - refundAmount;
+
+      order.refundAmount = refundAmount;
+      order.refundReason = reason || "Cancelled by store";
+      order.refundStatus = "PENDING";
+
+      try {
+        const cashfree = (await import("../lib/cashfree.js")).default;
+        const refundPayload = {
+          refund_id: `refund_${order._id.toString()}_${Date.now()}`,
+          refund_amount: refundAmount,
+          refund_note: reason || "Cancelled by store",
+          refund_speed: "STANDARD"
+        };
+
+        const { data } = await cashfree.post(
+          `/pg/orders/${order.cashfreeOrderId}/refunds`,
+          refundPayload
+        );
+
+        order.refundId = data.refund_id;
+      } catch (cashfreeErr) {
+        console.error("Cashfree store cancellation refund failed:", cashfreeErr.response?.data || cashfreeErr.message);
+        order.refundStatus = "FAILED";
+        await order.save();
+
+        return res.status(500).json({
+          error: "order_cancelled_but_refund_failed",
+          message: "Order has been cancelled, but refund failed. Please contact admin.",
+          order
+        });
+      }
+    }
+
+    await order.save();
+
+    await AuditLog.create({
+      actorId: req.store._id,
+      actorRole: "store",
+      type: "ORDER_CANCEL",
+      entityType: "ORDER",
+      entityId: order._id.toString(),
+      note: `Order cancelled by store manager. Reason: ${reason || "None"}`
+    });
+
+    res.json({ success: true, message: "Order cancelled successfully", order });
+  } catch (err) {
+    console.error("Seller cancel order failed:", err);
+    res.status(500).json({ error: "cancel_failed", message: err.message });
+  }
+});
+
+// Create Shiprocket shipment (seller)
+router.post("/orders/:id/shiprocket/create", protect, async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  try {
+    const order = await Order.findOne({ _id: req.params.id, store: req.store._id });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const Customer = (await import("../models/Customer.js")).default;
+    const { checkServiceability, createShiprocketClient } = await import("../lib/shiprocket.js");
+
+    let srEmail = req.store.shiprocketEmail || process.env.SHIPROCKET_EMAIL;
+    let srPassword = req.store.shiprocketPassword || process.env.SHIPROCKET_PASSWORD;
+    let pickupPincode = req.store.pickupAddress?.pincode || process.env.SHIPROCKET_PICKUP_PINCODE || "360001";
+    let pickupLocation = req.store.pickupName || process.env.SHIPROCKET_PICKUP_NAME || "Warehouse";
+
+    if (!srEmail || !srPassword) {
+      return res.status(400).json({ error: "shiprocket_credentials_missing", message: "Shiprocket credentials are not configured for this store." });
+    }
+
+    let addr = order.shippingAddress || {};
+    if (!addr.pincode || !addr.line1) {
+      const cust = await Customer.findOne({ phone: order.customer.phone });
+      if (cust) {
+        if (cust.address) {
+          const pincodeMatch = cust.address.match(/\b(\d{6})\b/);
+          const cityStateMatch = cust.address.match(/,\s*([^,]+),\s*([^,]+)\s*-\s*\d{6}/);
+          addr = {
+            line1: cust.address.split(',').slice(0, 2).join(',').trim(),
+            line2: '',
+            city: cityStateMatch ? cityStateMatch[1].trim() : '',
+            state: cityStateMatch ? cityStateMatch[2].trim() : '',
+            pincode: pincodeMatch ? pincodeMatch[1] : (cust.kyc?.pincode || '')
+          };
+        }
+      }
+    }
+
+    if (!addr.pincode || !addr.line1) {
+      return res.status(400).json({ error: "shipping_address_missing", message: "Customer shipping address or pincode is incomplete." });
+    }
+
+    const productIds = (order.items || []).map(it => it.product);
+    const products = await Product.find({ _id: { $in: productIds } });
+
+    let totalWeightGrams = 0;
+    const orderItems = (order.items || []).map(it => {
+      const p = products.find(prod => prod._id.toString() === it.product.toString());
+      if (p && p.weight) {
+        totalWeightGrams += (p.weight * it.quantity);
+      }
+      return {
+        name: it.name,
+        sku: it.variantSku || p?.sku || it.product.toString(),
+        units: it.quantity,
+        selling_price: Number(it.price || 0),
+        discount: 0,
+        tax: Number(it.gst || 0),
+        hsn: p?.hsn || "9999"
+      };
+    });
+
+    const weightKg = totalWeightGrams > 0 ? (totalWeightGrams / 1000) : 0.5;
+    const cleanPhone = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
+
+    const shipment = {
+      order_id: order._id.toString(),
+      order_date: new Date().toISOString().split('T')[0],
+      pickup_location: pickupLocation,
+      billing_customer_name: order.customer.name,
+      billing_last_name: "",
+      billing_address: addr.line1,
+      billing_address_2: addr.line2,
+      billing_city: addr.city,
+      billing_pincode: addr.pincode,
+      billing_state: addr.state,
+      billing_country: "India",
+      billing_email: order.customer.email || "customer@example.com",
+      billing_phone: cleanPhone,
+      shipping_is_billing: true,
+      order_items: orderItems,
+      payment_method: "Prepaid",
+      shipping_charges: 0,
+      giftwrap_charges: 0,
+      transaction_charges: 0,
+      total_discount: Number(order.couponDiscount || 0),
+      sub_total: Number(order.totalEstimate || 0),
+      length: 10,
+      breadth: 10,
+      height: 10,
+      weight: weightKg
+    };
+
+    const client = createShiprocketClient({ email: srEmail, password: srPassword });
+    const { data } = await client.post("/orders/create/adhoc", shipment);
+
+    const awb = data.awb_code;
+    const trackingUrl = `https://shiprocket.co/tracking/${awb}`;
+
+    if (awb) {
+      order.shipping = { provider: "SHIPROCKET", waybill: awb, status: data.status || "CREATED", trackingUrl };
+      order.shiprocketOrderId = data.order_id;
+      order.shiprocketShipmentId = data.shipment_id;
+      order.shiprocketAwbNumber = awb;
+      order.shipment_status = data.status;
+      order.shippingAddress = addr;
+      order.status = "SHIPPED";
+      await order.save();
+
+      await AuditLog.create({
+        actorId: req.store._id,
+        actorRole: "store",
+        type: "ORDER_STATUS",
+        entityType: "ORDER",
+        entityId: order._id.toString(),
+        note: `Shiprocket shipment created. AWB: ${awb}`
+      });
+
+      return res.json({ success: true, waybill: awb, trackingUrl, status: order.status });
+    }
+
+    return res.status(400).json({ error: "shipment_creation_failed", message: "Failed to generate AWB code from Shiprocket." });
+  } catch (err) {
+    console.error("Seller shiprocket create failed:", err.response?.data || err.message);
+    res.status(502).json({ error: "shipment_creation_failed", message: err.response?.data?.message || err.message });
+  }
+});
+
+// Download Shiprocket PDF Label (seller)
+router.get("/orders/:id/shiprocket/label/:awb", protect, async (req, res) => {
+  const awb = req.params.awb;
+  try {
+    const order = await Order.findOne({ _id: req.params.id, store: req.store._id }).lean();
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const PDFDocument = (await import("pdfkit")).default;
+    const doc = new PDFDocument({ margin: 24, size: "A6" });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
+    doc.pipe(res);
+    doc.fontSize(16).text("Shipping Label", { align: "center" });
+    doc.moveDown(0.5);
+    doc.fontSize(12).text(`Waybill: ${awb}`);
+    doc.moveDown(0.5);
+    doc.fontSize(12).text(`Name: ${order.customer?.name || ""}`);
+    doc.fontSize(10).text(`Phone: ${order.customer?.phone || ""}`);
+    const a = order.shippingAddress || {};
+    const line1 = [a.line1, a.line2].filter(Boolean).join(", ");
+    doc.moveDown(0.5);
+    doc.fontSize(10).text(line1);
+    doc.fontSize(10).text(`${a.city || ""}, ${a.state || ""} - ${a.pincode || ""}`);
+    doc.moveDown(0.5);
+    doc.fontSize(10).text(`Items: ${order.items?.length || 0}`);
+    doc.fontSize(12).text(`Amount: ₹${Number(order.totalEstimate || 0).toLocaleString("en-IN")}`);
+    doc.end();
+  } catch (err) {
+    console.error("Seller shiprocket label failed:", err);
+    res.status(500).json({ error: "label_generation_failed" });
+  }
+});
+
 // Get dashboard stats
 router.get("/dashboard", protect, async (req, res) => {
   try {
