@@ -44,7 +44,8 @@ const validateAndApplyCoupon = async (code, amount) => {
 const tryCreateShiprocketShipment = async (order) => {
   try {
     if (!process.env.SHIPROCKET_EMAIL || !process.env.SHIPROCKET_PASSWORD || !process.env.SHIPROCKET_PICKUP_PINCODE) {
-      throw new Error("Shiprocket not configured");
+      console.log("Shiprocket not configured, skipping shipment creation");
+      return null;
     }
     let addr = order.shippingAddress || {};
     if (!addr.pincode || !addr.line1) {
@@ -72,8 +73,14 @@ const tryCreateShiprocketShipment = async (order) => {
       }
     }
 
-    if (!addr.pincode) throw new Error("Customer pincode is missing");
-    if (!addr.line1) throw new Error("Customer address is missing");
+    if (!addr.pincode) {
+      console.log("Customer pincode is missing, skipping Shiprocket shipment");
+      return null;
+    }
+    if (!addr.line1) {
+      console.log("Customer address is missing, skipping Shiprocket shipment");
+      return null;
+    }
 
     const productIds = (order.items || []).map(it => it.product);
     const products = await Product.find({ _id: { $in: productIds } });
@@ -88,9 +95,9 @@ const tryCreateShiprocketShipment = async (order) => {
         name: it.name,
         sku: it.variantSku || p?.sku || it.product.toString(),
         units: it.quantity,
-        selling_price: it.price,
+        selling_price: Number(it.price || 0),
         discount: 0,
-        tax: it.gst,
+        tax: Number(it.gst || 0),
         hsn: p?.hsn || "9999"
       };
     });
@@ -118,8 +125,8 @@ const tryCreateShiprocketShipment = async (order) => {
       shipping_charges: 0,
       giftwrap_charges: 0,
       transaction_charges: 0,
-      total_discount: order.couponDiscount,
-      sub_total: order.totalEstimate,
+      total_discount: Number(order.couponDiscount || 0),
+      sub_total: Number(order.totalEstimate || 0),
       length: 10,
       breadth: 10,
       height: 10,
@@ -148,7 +155,8 @@ const tryCreateShiprocketShipment = async (order) => {
     return null;
   } catch (err) {
     console.error("Shiprocket Shipment Exception:", err.response?.data || err.message || err);
-    throw err;
+    // Don't throw, just return null so order creation doesn't fail
+    return null;
   }
 };
 
