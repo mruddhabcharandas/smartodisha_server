@@ -172,7 +172,7 @@ router.post("/calculate", async (req, res) => {
       selectedCourier = findBestCourier(courierList);
     }
 
-    const amt = Number(
+    const baseAmt = Number(
       selectedCourier?.rate
       || selectedCourier?.freight_charge
       || data?.data?.available_courier_companies?.[0]?.rate
@@ -181,41 +181,11 @@ router.post("/calculate", async (req, res) => {
       || 85
     );
     const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
-    const isFree = payment_method === "prepaid" || order_amount >= freeDeliveryAbove;
-    const discount = isFree ? amt : 0;
-    let final = isFree ? 0 : amt;
-    // COD charge: REMOVED as per user request
-    const codCharge = 0;
-    const codAvailable = (!!data?.cod || !!selectedCourier?.cod) && order_amount <= 2000;
-    res.json({
-      origin,
-      destination: dest,
-      weight,
-      order_amount,
-      payment_method,
-      amount: amt,
-      discount,
-      final,
-      label: isFree ? "FREE DELIVERY" : `₹${final} Delivery`,
-      delivery_charge: amt,
-      final_charge: final,
-      free_delivery_above: freeDeliveryAbove,
-      cod_available: codAvailable,
-      cod_charge: payment_method === "cod" ? codCharge : 0,
-      selected_courier: selectedCourier?.name || 'Delhivery'
-    });
-  } catch {
-    const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
-    const perKg = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
-    const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
-    const variable = perKg * weight;
-    const amt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
-    const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
-    const isFree = payment_method === "prepaid" || order_amount >= freeDeliveryAbove;
-    const discount = isFree ? amt : 0;
-    let final = isFree ? 0 : amt;
-    // COD charge: REMOVED as per user request
-    const codCharge = 0;
+    const isPrepaidFree = order_amount >= freeDeliveryAbove;
+    const deliveryCharge = payment_method === "prepaid" && isPrepaidFree ? 0 : baseAmt;
+    // COD charge: 5% or min ₹40, max ₹100
+    const codCharge = payment_method === "cod" ? Math.min(Math.max(Math.round(order_amount * 0.05), 40), 100) : 0;
+    const final = deliveryCharge + codCharge;
     const codAvailable = order_amount <= 2000;
     res.json({
       origin,
@@ -223,15 +193,45 @@ router.post("/calculate", async (req, res) => {
       weight,
       order_amount,
       payment_method,
-      amount: amt,
-      discount,
+      amount: baseAmt,
+      discount: isPrepaidFree ? baseAmt : 0,
       final,
-      label: isFree ? "FREE DELIVERY" : `₹${final} Delivery`,
-      delivery_charge: amt,
+      label: final === 0 ? "FREE DELIVERY" : `₹${final} Delivery`,
+      delivery_charge: deliveryCharge,
       final_charge: final,
       free_delivery_above: freeDeliveryAbove,
       cod_available: codAvailable,
-      cod_charge: payment_method === "cod" ? codCharge : 0,
+      cod_charge: codCharge,
+      selected_courier: selectedCourier?.name || 'Delhivery'
+    });
+  } catch {
+    const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
+    const perKg = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
+    const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
+    const variable = perKg * weight;
+    const baseAmt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
+    const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
+    const isPrepaidFree = order_amount >= freeDeliveryAbove;
+    const deliveryCharge = payment_method === "prepaid" && isPrepaidFree ? 0 : baseAmt;
+    // COD charge: 5% or min ₹40, max ₹100
+    const codCharge = payment_method === "cod" ? Math.min(Math.max(Math.round(order_amount * 0.05), 40), 100) : 0;
+    const final = deliveryCharge + codCharge;
+    const codAvailable = order_amount <= 2000;
+    res.json({
+      origin,
+      destination: dest,
+      weight,
+      order_amount,
+      payment_method,
+      amount: baseAmt,
+      discount: isPrepaidFree ? baseAmt : 0,
+      final,
+      label: final === 0 ? "FREE DELIVERY" : `₹${final} Delivery`,
+      delivery_charge: deliveryCharge,
+      final_charge: final,
+      free_delivery_above: freeDeliveryAbove,
+      cod_available: codAvailable,
+      cod_charge: codCharge,
       selected_courier: 'Delhivery'
     });
   }
