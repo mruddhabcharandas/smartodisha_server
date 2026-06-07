@@ -181,8 +181,8 @@ router.post("/calculate", async (req, res) => {
       || 85
     );
     const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
-    const isPrepaidFree = order_amount >= freeDeliveryAbove;
-    const deliveryCharge = payment_method === "prepaid" && isPrepaidFree ? 0 : baseAmt;
+    const isPrepaidFree = order_amount >= freeDeliveryAbove && payment_method === 'prepaid';
+    const deliveryCharge = isPrepaidFree ? 0 : baseAmt;
     // COD charge: 5% or min ₹40, max ₹100
     const codCharge = payment_method === "cod" ? Math.min(Math.max(Math.round(order_amount * 0.05), 40), 100) : 0;
     const final = deliveryCharge + codCharge;
@@ -196,7 +196,7 @@ router.post("/calculate", async (req, res) => {
       amount: baseAmt,
       discount: isPrepaidFree ? baseAmt : 0,
       final,
-      label: final === 0 ? "FREE DELIVERY" : `₹${final} Delivery`,
+      label: final === 0 && payment_method === 'prepaid' ? "FREE DELIVERY" : `₹${final} Delivery`,
       delivery_charge: deliveryCharge,
       final_charge: final,
       free_delivery_above: freeDeliveryAbove,
@@ -211,8 +211,8 @@ router.post("/calculate", async (req, res) => {
     const variable = perKg * weight;
     const baseAmt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
     const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
-    const isPrepaidFree = order_amount >= freeDeliveryAbove;
-    const deliveryCharge = payment_method === "prepaid" && isPrepaidFree ? 0 : baseAmt;
+    const isPrepaidFree = order_amount >= freeDeliveryAbove && payment_method === 'prepaid';
+    const deliveryCharge = isPrepaidFree ? 0 : baseAmt;
     // COD charge: 5% or min ₹40, max ₹100
     const codCharge = payment_method === "cod" ? Math.min(Math.max(Math.round(order_amount * 0.05), 40), 100) : 0;
     const final = deliveryCharge + codCharge;
@@ -226,7 +226,7 @@ router.post("/calculate", async (req, res) => {
       amount: baseAmt,
       discount: isPrepaidFree ? baseAmt : 0,
       final,
-      label: final === 0 ? "FREE DELIVERY" : `₹${final} Delivery`,
+      label: final === 0 && payment_method === 'prepaid' ? "FREE DELIVERY" : `₹${final} Delivery`,
       delivery_charge: deliveryCharge,
       final_charge: final,
       free_delivery_above: freeDeliveryAbove,
