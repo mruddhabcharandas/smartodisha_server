@@ -207,6 +207,112 @@ const tryCreateShiprocketShipment = async (order) => {
   }
 };
 
+export const confirmAndFinalizeOrder = async (order, cashfreePaymentId, cashfreeSignature) => {
+  if (order.paymentStatus === "PAID") {
+    console.log("confirmAndFinalizeOrder: Order already paid:", order._id.toString());
+    return order;
+  }
+
+  console.log("=== confirmAndFinalizeOrder: Finalizing order ===", order._id.toString());
+  order.paymentStatus = "PAID";
+  order.status = "CONFIRMED";
+  if (cashfreePaymentId) order.cashfreePaymentId = cashfreePaymentId;
+  if (cashfreeSignature) order.cashfreeSignature = cashfreeSignature;
+
+  // Decrement Stock
+  const uniqueIds = [...new Set(order.items.map(x => x.product.toString()))];
+  const products = await Product.find({ _id: { $in: uniqueIds } });
+
+  for (const it of order.items) {
+    const qty = Number(it.quantity || 0);
+    const p = products.find(x => x._id.toString() === it.product.toString());
+    if (p) {
+      if (it.variantSku) {
+        await Product.updateOne(
+          { _id: it.product, "variants.sku": String(it.variantSku) },
+          { $inc: { "variants.$.stock": -qty } }
+        );
+      } else {
+        await Product.updateOne(
+          { _id: it.product },
+          { $inc: { stock: -qty } }
+        );
+      }
+    }
+  }
+
+  // Update parent product stocks
+  for (const id of uniqueIds) {
+    const p = await Product.findById(id);
+    if (p && p.variants && p.variants.length > 0) {
+      const sum = p.variants.filter(v => v.isActive !== false).reduce((s, v) => s + (v.stock || 0), 0);
+      p.stock = sum;
+      await p.save();
+    }
+  }
+
+  // Update Coupon count if applied
+  if (order.couponCode) {
+    try {
+      const coupon = await Coupon.findOne({ code: order.couponCode.toUpperCase() });
+      if (coupon) {
+        coupon.usedCount = (coupon.usedCount || 0) + 1;
+        await coupon.save();
+      }
+    } catch (err) {
+      console.error("Failed to increment coupon count:", err);
+    }
+  }
+
+  // Create Bill
+  try {
+    await createBillFromData({
+      customerData: { phone: order.customer.phone, name: order.customer.name, email: order.customer.email },
+      items: order.items.map(it => ({
+        product: it.product,
+        variantSku: it.variantSku ? String(it.variantSku) : undefined,
+        quantity: it.quantity
+      })),
+      paymentType: order.paymentMethod,
+      existingOrderId: order._id
+    });
+  } catch (err) {
+    console.error("Billing creation failed on finalize:", err);
+  }
+
+  // Send Email
+  try {
+    const to = order.customer.email || process.env.MAIL_TO || process.env.COMPANY_EMAIL || process.env.MAIL_FROM;
+    const html = renderMail({
+      heading: order.paymentMethod === "COD" ? "Order Confirmed (COD)" : "Payment Confirmed",
+      subheading: order.paymentMethod === "COD" 
+        ? "Your COD order has been confirmed. 15% advance received." 
+        : "We’ve confirmed your payment and are preparing your shipment.",
+      highlight: `Order ID: ${order.orderNumber}`,
+      blocks: [
+        { label: "Payment Method", value: order.paymentMethod },
+        { label: "Amount Paid", value: `₹${Number(order.paymentMethod === "COD" ? Math.ceil(order.totalEstimate * 0.15) : order.totalEstimate).toLocaleString("en-IN")}` },
+        ...(order.paymentMethod === "COD" ? [{ label: "COD Due Amount", value: `₹${Number(order.codDueAmount).toLocaleString("en-IN")}` }] : []),
+        { label: "Current Status", value: order.status }
+      ]
+    });
+    if (to) await sendEmail({ to, subject: `Order confirmed - ${process.env.COMPANY_NAME || "SmartOdisha"}`, html });
+  } catch (err) {
+    console.error("Email send failed on finalize:", err);
+  }
+
+  // Shiprocket auto creation
+  try {
+    await tryCreateShiprocketShipment(order);
+  } catch (err) {
+    console.error("Shiprocket shipment auto-create failed on finalize:", err);
+  }
+
+  // Save the finalized order
+  await order.save();
+  return order;
+};
+
 // Create new order
 router.post("/", auth, requireRole("customer"), async (req, res) => {
   const { items, notes, paymentMethod, couponCode, cashfreeOrderId, cashfreePaymentId, cashfreeSignature } = req.body || {};
@@ -438,7 +544,7 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
     const minAmount = Number(process.env.MIN_ORDER_AMOUNT || 5000);
     if (totals.total < minAmount) return res.status(400).json({ error: "min_order_not_met", minAmount });
 
-    const { finalAmount: payableProductTotal } = await validateAndApplyCoupon(couponCode, totals.total);
+    const { discount: coupDiscount, finalAmount: payableProductTotal } = await validateAndApplyCoupon(couponCode, totals.total);
 
     // Calculate shipping cost
     let shippingCost = 0;
@@ -559,9 +665,52 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
     const isSandbox = appId.toUpperCase().startsWith("TEST");
     const cashfreeMode = isSandbox ? "sandbox" : "production";
 
+    // Setup order items for draft creation
+    const orderItems = totals.items.map((it) => {
+      const p = products.find(x => x._id.toString() === it.product.toString());
+      const v = it.variantSku ? (p?.variants || []).find(v => v.sku === String(it.variantSku)) : null;
+      return {
+        product: it.product,
+        variantSku: it.variantSku ? String(it.variantSku) : "",
+        attributes: v ? (v.attributes instanceof Map ? Object.fromEntries(v.attributes) : v.attributes) : undefined,
+        name: it.name,
+        price: it.price,
+        gst: it.gst,
+        quantity: it.quantity,
+        lineTotal: it.lineTotal,
+        image: (v?.images?.[0]?.url || p?.images?.[0]?.url || "")
+      };
+    });
+
+    const shippingAddress = deliveryAddress ? {
+      line1: deliveryAddress.addressLine1,
+      line2: deliveryAddress.addressLine2 || "",
+      city: deliveryAddress.city,
+      state: deliveryAddress.state,
+      pincode: deliveryAddress.pincode
+    } : {
+      line1: cust.kyc?.addressLine1 || cust.address || "",
+      line2: cust.kyc?.addressLine2 || "",
+      city: cust.kyc?.city || "",
+      state: cust.kyc?.state || "",
+      pincode: cust.kyc?.pincode || ""
+    };
+
+    let baseTotal = 0;
+    for (const it of items) {
+      const p = products.find(x => x._id.toString() === it.productId.toString());
+      const v = it.variantSku ? (p?.variants || []).find(v => v.sku === String(it.variantSku)) : null;
+      const basePrice = v ? (v.originalStorePrice || v.price || 0) : (p?.originalStorePrice || p?.price || 0);
+      baseTotal += basePrice * it.quantity;
+    }
+    const store = products[0]?.store;
+    const adminCutPercent = store?.adminCutPercentage || 5;
+    const storeRevenue = baseTotal * (1 - adminCutPercent / 100);
+    const adminRevenue = totalPayable - storeRevenue;
+
     if (paymentMethod === "COD") {
-      // COD requires 15% advance on total amount (rounded to whole number for payment)
-      const advanceAmount = Math.round(totalPayable * 0.15); // Round to whole number
+      // COD requires 15% advance on total amount (forced to Math.ceil!)
+      const advanceAmount = Math.ceil(totalPayable * 0.15);
       const codDueAmount = totalPayable - advanceAmount; // Remaining on delivery
       
       if (!process.env.CASHFREE_APP_ID || !process.env.CASHFREE_SECRET_KEY) {
@@ -578,6 +727,28 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
           customer_email: emailVal,
           customer_phone: cleanPhone
         }
+      });
+
+      // Create draft Order
+      await Order.create({
+        customer: { name: nameVal, phone: cleanPhone, email: emailVal || "" },
+        shippingAddress,
+        items: orderItems,
+        totalEstimate: totalPayable,
+        productTotal: payableProductTotal,
+        shippingCost: shippingCost || 0,
+        codCharge: codCharge || 0,
+        couponCode: couponCode?.toUpperCase() || "",
+        couponDiscount: coupDiscount,
+        status: "PENDING_PAYMENT",
+        paymentMethod: "COD",
+        paymentStatus: "PENDING",
+        cashfreeOrderId: data.order_id,
+        codDueAmount: codDueAmount,
+        notes: "",
+        store: store?._id || null,
+        storeRevenue: Number(storeRevenue.toFixed(2)),
+        adminRevenue: Number(adminRevenue.toFixed(2))
       });
       
       return res.json({
@@ -608,6 +779,28 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
           customer_phone: cleanPhone
         }
       });
+
+      // Create draft Order
+      await Order.create({
+        customer: { name: nameVal, phone: cleanPhone, email: emailVal || "" },
+        shippingAddress,
+        items: orderItems,
+        totalEstimate: totalPayable,
+        productTotal: payableProductTotal,
+        shippingCost: shippingCost || 0,
+        codCharge: 0,
+        couponCode: couponCode?.toUpperCase() || "",
+        couponDiscount: coupDiscount,
+        status: "PENDING_PAYMENT",
+        paymentMethod: "CASHFREE",
+        paymentStatus: "PENDING",
+        cashfreeOrderId: data.order_id,
+        codDueAmount: 0,
+        notes: "",
+        store: store?._id || null,
+        storeRevenue: Number(storeRevenue.toFixed(2)),
+        adminRevenue: Number(adminRevenue.toFixed(2))
+      });
       
       return res.json({
         cashfreeOrderId: data.order_id,
@@ -632,191 +825,171 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
   
   const { cashfreeOrderId, cashfreePaymentId, cashfreeSignature, items, paymentMethod, notes, couponCode, deliveryAddress, totalAmount, codDueAmount, productTotal, shippingCost, codCharge } = req.body || {};
   if (!["CASHFREE", "COD"].includes(paymentMethod)) return res.status(400).json({ error: "invalid_payment_method" });
-  if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "no_items" });
-
-  const exists = await Order.findOne({ cashfreePaymentId: cashfreePaymentId });
-  if (exists) return res.status(400).json({ error: "order_already_created" });
-
-  const cust = await Customer.findById(req.user.id).select("name phone email kyc address");
-  if (!cust) return res.status(404).json({ error: "customer_not_found" });
 
   try {
-    const uniqueIds = [...new Set(items.map((x) => x.productId))];
-    const products = await Product.find({ _id: { $in: uniqueIds }, isActive: true }).populate('store');
-    if (products.length !== uniqueIds.length) return res.status(400).json({ error: "product_not_found" });
-    
-    // Get store from first product (assuming all products from same store for now)
-    const store = products[0]?.store;
-    
-    // Calculate base revenue (originalStorePrice total)
-    let baseTotal = 0;
-    for (const it of items) {
-      const p = products.find(x => x._id.toString() === it.productId);
-      const v = it.variantSku ? (p?.variants || []).find(v => v.sku === String(it.variantSku)) : null;
-      const basePrice = v ? (v.originalStorePrice || v.price || 0) : (p?.originalStorePrice || p?.price || 0);
-      baseTotal += basePrice * it.quantity;
+    // 1. Prevent duplicate order & retrieve existing draft order
+    let existingOrder = await Order.findOne({ cashfreeOrderId });
+    if (existingOrder && existingOrder.paymentStatus === "PAID") {
+      console.log('Order already paid and finalized:', existingOrder._id.toString());
+      return res.json({ success: true, orderId: existingOrder._id, orderNumber: existingOrder.orderNumber });
     }
 
-    // Apply store percentage markup to product prices inside the products array before totals and stock validation
-    for (const p of products) {
-      const storePercentage = p.store?.storePercentage || 0;
-      p.price = Number((p.price * (1 + storePercentage / 100)).toFixed(2));
-      if (p.mrp != null) {
-        p.mrp = Number((p.mrp * (1 + storePercentage / 100)).toFixed(2));
+    // 2. Query Cashfree to verify that the order has indeed been paid
+    if (!process.env.CASHFREE_APP_ID || !process.env.CASHFREE_SECRET_KEY) {
+      return res.status(500).json({ error: "cashfree_not_configured" });
+    }
+
+    let cfOrderPaid = false;
+    try {
+      const { data: cfOrder } = await cashfree.get(`/pg/orders/${cashfreeOrderId}`);
+      console.log('Cashfree order status:', cfOrder.order_status);
+      if (cfOrder.order_status === "PAID") {
+        cfOrderPaid = true;
       }
-      if (p.variants && p.variants.length > 0) {
-        for (const v of p.variants) {
-          v.price = Number((v.price * (1 + storePercentage / 100)).toFixed(2));
-          if (v.mrp != null) {
-            v.mrp = Number((v.mrp * (1 + storePercentage / 100)).toFixed(2));
+    } catch (err) {
+      console.error("Failed to fetch order status from Cashfree:", err.response?.data || err.message);
+    }
+
+    if (!cfOrderPaid) {
+      return res.status(400).json({ error: "payment_not_verified" });
+    }
+
+    // 3. Fallback: Create draft order if it doesn't exist (e.g. if prepare-payment failed to save it)
+    if (!existingOrder) {
+      console.log("Draft order not found, creating fallback draft order...");
+      const cust = await Customer.findById(req.user.id).select("name phone email kyc address");
+      if (!cust) return res.status(404).json({ error: "customer_not_found" });
+
+      if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "no_items" });
+
+      const uniqueIds = [...new Set(items.map((x) => x.productId))];
+      const products = await Product.find({ _id: { $in: uniqueIds }, isActive: true }).populate('store');
+      if (products.length !== uniqueIds.length) return res.status(400).json({ error: "product_not_found" });
+      
+      const store = products[0]?.store;
+      
+      // Calculate revenues
+      let baseTotal = 0;
+      for (const it of items) {
+        const p = products.find(x => x._id.toString() === it.productId);
+        const v = it.variantSku ? (p?.variants || []).find(v => v.sku === String(it.variantSku)) : null;
+        const basePrice = v ? (v.originalStorePrice || v.price || 0) : (p?.originalStorePrice || p?.price || 0);
+        baseTotal += basePrice * it.quantity;
+      }
+      const adminCutPercent = store?.adminCutPercentage || 5;
+      const storeRevenue = baseTotal * (1 - adminCutPercent / 100);
+
+      // Apply store percentage markup to product prices inside the products array before totals and stock validation
+      for (const p of products) {
+        const storePercentage = p.store?.storePercentage || 0;
+        p.price = Number((p.price * (1 + storePercentage / 100)).toFixed(2));
+        if (p.mrp != null) {
+          p.mrp = Number((p.mrp * (1 + storePercentage / 100)).toFixed(2));
+        }
+        if (p.variants && p.variants.length > 0) {
+          for (const v of p.variants) {
+            v.price = Number((v.price * (1 + storePercentage / 100)).toFixed(2));
+            if (v.mrp != null) {
+              v.mrp = Number((v.mrp * (1 + storePercentage / 100)).toFixed(2));
+            }
           }
         }
       }
-    }
-    
-    // Calculate admin cut and store revenue
-    const adminCutPercent = store?.adminCutPercentage || 5;
-    const storeRevenue = baseTotal * (1 - adminCutPercent / 100);
-    
-    const totals = computeTotals(products, items);
-    const { discount: coupDiscount, finalAmount: payableProductTotal, couponId } = await validateAndApplyCoupon(couponCode, totals.total);
-    
-    // Use provided totals or calculate
-    const finalTotal = totalAmount || payableProductTotal + (shippingCost || 0) + (codCharge || 0);
-    const adminRevenue = finalTotal - storeRevenue;
-    
-    for (const it of items) {
-      const p = products.find(x => x._id.toString() === it.productId);
-      if (!p) return res.status(400).json({ error: "product_not_found" });
-      const qty = Number(it.quantity || 0);
-      if (it.variantSku) {
-        const v = (p.variants || []).find(v => v.sku === String(it.variantSku));
-        if (!v || (v.stock || 0) < qty) return res.status(400).json({ error: "stock_changed" });
-      } else if ((p.stock || 0) < qty) {
-        return res.status(400).json({ error: "stock_changed" });
-      }
-    }
 
-    const orderItems = totals.items.map((it) => {
-      const p = products.find(x => x._id.toString() === it.product.toString());
-      const v = it.variantSku ? (p?.variants || []).find(v => v.sku === String(it.variantSku)) : null;
-      return {
-        product: it.product,
-        variantSku: it.variantSku ? String(it.variantSku) : "",
-        attributes: v ? (v.attributes instanceof Map ? Object.fromEntries(v.attributes) : v.attributes) : undefined,
-        name: it.name,
-        price: it.price,
-        gst: it.gst,
-        quantity: it.quantity,
-        lineTotal: it.lineTotal,
-        image: (v?.images?.[0]?.url || p?.images?.[0]?.url || "")
-      };
-    });
+      const totals = computeTotals(products, items);
+      const { discount: coupDiscount, finalAmount: payableProductTotal } = await validateAndApplyCoupon(couponCode, totals.total);
+      
+      const finalTotal = totalAmount || payableProductTotal + (shippingCost || 0) + (codCharge || 0);
+      const adminRevenue = finalTotal - storeRevenue;
 
-    // Use provided delivery address or fall back to customer's address
-    const shippingAddress = deliveryAddress ? {
-      line1: deliveryAddress.addressLine1,
-      line2: deliveryAddress.addressLine2 || "",
-      city: deliveryAddress.city,
-      state: deliveryAddress.state,
-      pincode: deliveryAddress.pincode
-    } : {
-      line1: cust.kyc?.addressLine1 || cust.address || "",
-      line2: cust.kyc?.addressLine2 || "",
-      city: cust.kyc?.city || "",
-      state: cust.kyc?.state || "",
-      pincode: cust.kyc?.pincode || ""
-    };
-
-    console.log('Creating order with finalTotal:', finalTotal);
-    const doc = await Order.create({
-      customer: { name: cust.name, phone: cust.phone, email: cust.email || "" },
-      shippingAddress,
-      items: orderItems,
-      totalEstimate: finalTotal,
-      productTotal: productTotal || payableProductTotal,
-      shippingCost: shippingCost || 0,
-      codCharge: codCharge || 0,
-      couponCode: couponCode?.toUpperCase() || "",
-      couponDiscount: coupDiscount,
-      status: "CONFIRMED",
-      paymentMethod,
-      paymentStatus: "PAID",
-      cashfreeOrderId,
-      cashfreePaymentId,
-      cashfreeSignature,
-      codDueAmount: paymentMethod === "COD" ? (codDueAmount || Math.round(finalTotal * 0.85)) : 0,
-      notes: notes || "",
-      store: store?._id || null,
-      storeRevenue: Number(storeRevenue.toFixed(2)),
-      adminRevenue: Number(adminRevenue.toFixed(2))
-    });
-    console.log('Order created successfully! Order ID:', doc._id.toString(), 'Order Number:', doc.orderNumber);
-
-    if (couponId) {
-      await Coupon.findByIdAndUpdate(couponId, { $inc: { usedCount: 1 } });
-    }
-
-    for (const it of items) {
-      const qty = Number(it.quantity || 0);
-      if (it.variantSku) {
-        await Product.updateOne(
-          { _id: it.productId, "variants.sku": String(it.variantSku) },
-          { $inc: { "variants.$.stock": -qty } }
-        );
-      } else {
-        await Product.updateOne(
-          { _id: it.productId },
-          { $inc: { stock: -qty } }
-        );
-      }
-    }
-    for (const id of uniqueIds) {
-      const p = await Product.findById(id);
-      if (p && p.variants && p.variants.length > 0) {
-        const sum = p.variants.filter(v => v.isActive !== false).reduce((s, v) => s + (v.stock || 0), 0);
-        p.stock = sum;
-        await p.save();
-      }
-    }
-
-    try {
-      await createBillFromData({
-        customerData: { phone: doc.customer.phone, name: doc.customer.name, email: doc.customer.email },
-        items: doc.items.map(it => ({
+      const orderItems = totals.items.map((it) => {
+        const p = products.find(x => x._id.toString() === it.product.toString());
+        const v = it.variantSku ? (p?.variants || []).find(v => v.sku === String(it.variantSku)) : null;
+        return {
           product: it.product,
-          variantSku: it.variantSku ? String(it.variantSku) : undefined,
-          quantity: it.quantity
-        })),
-        paymentType: paymentMethod,
-        existingOrderId: doc._id
+          variantSku: it.variantSku ? String(it.variantSku) : "",
+          attributes: v ? (v.attributes instanceof Map ? Object.fromEntries(v.attributes) : v.attributes) : undefined,
+          name: it.name,
+          price: it.price,
+          gst: it.gst,
+          quantity: it.quantity,
+          lineTotal: it.lineTotal,
+          image: (v?.images?.[0]?.url || p?.images?.[0]?.url || "")
+        };
       });
-    } catch {}
 
-    try {
-      const to = cust.email || process.env.MAIL_TO || process.env.COMPANY_EMAIL || process.env.MAIL_FROM;
-      const html = renderMail({
-        heading: paymentMethod === "COD" ? "Order Confirmed (COD)" : "Payment Confirmed",
-        subheading: paymentMethod === "COD" 
-          ? "Your COD order has been confirmed. 15% advance received." 
-          : "We’ve confirmed your payment and are preparing your shipment.",
-        highlight: `Order ID: ${doc.orderNumber}`,
-        blocks: [
-          { label: "Payment Method", value: paymentMethod },
-          { label: "Amount Paid", value: `₹${Number(paymentMethod === "COD" ? Math.round(finalTotal * 0.15 * 100) / 100 : doc.totalEstimate).toLocaleString("en-IN")}` },
-          ...(paymentMethod === "COD" ? [{ label: "COD Due Amount", value: `₹${Number(doc.codDueAmount).toLocaleString("en-IN")}` }] : []),
-          { label: "Current Status", value: doc.status }
-        ]
+      const shippingAddress = deliveryAddress ? {
+        line1: deliveryAddress.addressLine1,
+        line2: deliveryAddress.addressLine2 || "",
+        city: deliveryAddress.city,
+        state: deliveryAddress.state,
+        pincode: deliveryAddress.pincode
+      } : {
+        line1: cust.kyc?.addressLine1 || cust.address || "",
+        line2: cust.kyc?.addressLine2 || "",
+        city: cust.kyc?.city || "",
+        state: cust.kyc?.state || "",
+        pincode: cust.kyc?.pincode || ""
+      };
+
+      existingOrder = await Order.create({
+        customer: { name: cust.name, phone: cust.phone, email: cust.email || "" },
+        shippingAddress,
+        items: orderItems,
+        totalEstimate: finalTotal,
+        productTotal: productTotal || payableProductTotal,
+        shippingCost: shippingCost || 0,
+        codCharge: codCharge || 0,
+        couponCode: couponCode?.toUpperCase() || "",
+        couponDiscount: coupDiscount,
+        status: "PENDING_PAYMENT",
+        paymentMethod,
+        paymentStatus: "PENDING",
+        cashfreeOrderId,
+        codDueAmount: paymentMethod === "COD" ? (codDueAmount || Math.round(finalTotal * 0.85)) : 0,
+        notes: notes || "",
+        store: store?._id || null,
+        storeRevenue: Number(storeRevenue.toFixed(2)),
+        adminRevenue: Number(adminRevenue.toFixed(2))
       });
-      if (to) await sendEmail({ to, subject: `Order confirmed - ${process.env.COMPANY_NAME || "SmartOdisha"}`, html });
-    } catch {}
+    }
 
-    try { await tryCreateShiprocketShipment(doc); } catch {}
+    // 4. Finalize order
+    const finalized = await confirmAndFinalizeOrder(existingOrder, cashfreePaymentId, cashfreeSignature);
 
-    return res.json({ success: true, orderId: doc._id, orderNumber: doc.orderNumber });
+    return res.json({
+      success: true,
+      orderId: finalized._id,
+      orderNumber: finalized.orderNumber
+    });
   } catch (e) {
     console.error("Create after verify error:", e);
     return res.status(500).json({ error: "order_create_failed" });
+  }
+});
+
+// GET customer own order details
+router.get("/my/:id", auth, requireRole("customer"), async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  try {
+    const cust = await Customer.findById(req.user.id).select("phone email");
+    if (!cust) return res.status(404).json({ error: "customer_not_found" });
+
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "not_found" });
+
+    // Verify ownership via phone matching
+    const orderPhoneClean = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
+    const custPhoneClean = String(cust.phone || "").replace(/\D/g, "").slice(-10);
+
+    if (orderPhoneClean !== custPhoneClean) {
+      return res.status(403).json({ error: "forbidden" });
+    }
+
+    res.json(order);
+  } catch (err) {
+    console.error("Failed to fetch customer order:", err);
+    res.status(500).json({ error: "failed_to_fetch_order" });
   }
 });
 

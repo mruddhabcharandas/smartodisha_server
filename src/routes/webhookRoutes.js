@@ -2,6 +2,7 @@ import express from "express";
 import crypto from "crypto";
 import Order from "../models/Order.js";
 import { createBillFromData } from "../lib/billing.js";
+import { confirmAndFinalizeOrder } from "./orderRoutes.js";
 
 const router = express.Router();
 
@@ -27,17 +28,9 @@ router.post("/cashfree", express.raw({ type: "application/json" }), async (req, 
       const orderId = payload.data.order.order_id;
       const order = await Order.findOne({ cashfreeOrderId: orderId });
       if (order && order.paymentStatus !== "PAID") {
-        order.paymentStatus = "PAID";
-        order.status = "CONFIRMED";
-        await order.save();
-        try {
-          await createBillFromData({
-            customerData: { phone: order.customer.phone, name: order.customer.name, email: order.customer.email },
-            items: order.items.map(it => ({ product: it.product, quantity: it.quantity })),
-            paymentType: "CASHFREE",
-            existingOrderId: order._id
-          });
-        } catch {}
+        const cfPaymentId = payload.data.payment?.cf_payment_id || "";
+        const cfSignature = payload.data.payment?.payment_signature || "";
+        await confirmAndFinalizeOrder(order, cfPaymentId, cfSignature);
       }
     }
 
