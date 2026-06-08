@@ -194,7 +194,7 @@ const tryCreateShiprocketShipment = async (order) => {
       order.shiprocketAwbNumber = awb;
       order.shipment_status = data.status;
       order.shippingAddress = addr;
-      order.status = "SHIPPED";
+      // Do not auto-set order status to SHIPPED. Keep it as CONFIRMED so seller can manually manage the fulfillment lifecycle.
       await order.save();
       return order;
     }
