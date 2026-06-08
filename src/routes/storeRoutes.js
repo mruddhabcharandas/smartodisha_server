@@ -941,27 +941,29 @@ router.patch("/products/:id/stock", protect, async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
     const qty = Number(req.body?.quantity);
-    if (!Number.isInteger(qty) || qty <= 0) return res.status(400).json({ error: "invalid_quantity" });
+    if (!Number.isInteger(qty) || qty === 0) return res.status(400).json({ error: "invalid_quantity" });
     
     const doc = await Product.findById(req.params.id);
     if (!doc || !doc.isActive) return res.status(404).json({ error: "not_found" });
     if (doc.store?.toString() !== req.store._id.toString()) return res.status(403).json({ error: "forbidden" });
 
-    if (doc.stock - qty < 0) return res.status(400).json({ error: "insufficient_stock" });
+    if (doc.stock + qty < 0) return res.status(400).json({ error: "insufficient_stock" });
     const before = doc.stock;
-    doc.stock -= qty;
+    doc.stock += qty;
     await doc.save();
     
     await StockTxn.create({ 
       product: doc._id, 
-      type: req.body?.reason === "ADJUST" ? "ADJUST" : "SOLD", 
+      type: "ADJUST", 
       quantity: qty, 
       before, 
       after: doc.stock, 
       refType: "MANUAL", 
-      note: req.body?.note || "" 
+      note: req.body?.note || `Manual Adjustment (${qty > 0 ? '+' : ''}${qty})`
     });
     
+    await bumpCacheVersion("products:grouped");
+    await bumpCacheVersion("products:list");
     res.json({ id: doc._id.toString(), stock: doc.stock });
   } catch (err) {
     console.error(err);
@@ -1146,7 +1148,7 @@ router.patch("/products/:id/variants/:vid/stock", protect, async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
     const qty = Number(req.body?.quantity);
-    if (!Number.isInteger(qty) || qty <= 0) return res.status(400).json({ error: "invalid_quantity" });
+    if (!Number.isInteger(qty) || qty === 0) return res.status(400).json({ error: "invalid_quantity" });
     const p = await Product.findById(req.params.id);
     if (!p || !p.isActive) return res.status(404).json({ error: "not_found" });
     if (p.store?.toString() !== req.store._id.toString()) return res.status(403).json({ error: "forbidden" });
@@ -1154,9 +1156,9 @@ router.patch("/products/:id/variants/:vid/stock", protect, async (req, res) => {
     const idx = (p.variants || []).findIndex(v => v._id.toString() === req.params.vid);
     if (idx === -1) return res.status(404).json({ error: "variant_not_found" });
     const v = p.variants[idx];
-    if ((v.stock || 0) - qty < 0) return res.status(400).json({ error: "insufficient_stock" });
+    if ((v.stock || 0) + qty < 0) return res.status(400).json({ error: "insufficient_stock" });
     const before = v.stock || 0;
-    v.stock = before - qty;
+    v.stock = before + qty;
     p.markModified("variants");
     await p.save();
     try {
@@ -1164,7 +1166,10 @@ router.patch("/products/:id/variants/:vid/stock", protect, async (req, res) => {
       p.stock = Number.isFinite(sum) ? sum : 0;
       await p.save();
     } catch {}
-    await StockTxn.create({ product: p._id, type: req.body?.reason === "ADJUST" ? "ADJUST" : "SOLD", quantity: qty, before, after: v.stock, refType: "MANUAL", note: req.body?.note || "", variantSku: v.sku });
+    await StockTxn.create({ product: p._id, type: "ADJUST", quantity: qty, before, after: v.stock, refType: "MANUAL", note: req.body?.note || `Manual Adjustment (${qty > 0 ? '+' : ''}${qty})`, variantSku: v.sku });
+    
+    await bumpCacheVersion("products:grouped");
+    await bumpCacheVersion("products:list");
     res.json({ id: v._id.toString(), stock: v.stock });
   } catch (err) {
     console.error(err);

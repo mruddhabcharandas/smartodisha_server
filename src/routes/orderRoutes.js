@@ -806,8 +806,11 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
         cashfreeOrderId: data.order_id,
         paymentSessionId: data.payment_session_id,
         amount: totalPayable,
+        totalAmount: totalPayable,
         productTotal: payableProductTotal,
         shippingCost,
+        codCharge: 0,
+        codDueAmount: 0,
         paymentMethod: "CASHFREE",
         cashfreeMode
       });

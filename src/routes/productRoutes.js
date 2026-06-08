@@ -57,22 +57,38 @@ const withDerived = (p) => {
 const sanitizeProduct = (p, canViewPrice) => {
   let obj = withDerived(p);
   const storePercentage = obj.store?.storePercentage || 0;
-  if (storePercentage > 0) {
-    obj.price = Number((obj.price * (1 + storePercentage / 100)).toFixed(2));
-    if (obj.mrp != null) {
-      obj.mrp = Number((obj.mrp * (1 + storePercentage / 100)).toFixed(2));
-    }
-    if (obj.variants && obj.variants.length > 0) {
-      obj.variants = obj.variants.map(v => {
-        const vObj = v.toObject ? v.toObject() : { ...v };
+  
+  if (obj.variants && obj.variants.length > 0) {
+    obj.variants = obj.variants.map(v => {
+      const vObj = v.toObject ? v.toObject() : { ...v };
+      if (vObj.attributes) {
+        if (vObj.attributes instanceof Map) {
+          vObj.attributes = Object.fromEntries(vObj.attributes);
+        } else if (typeof vObj.attributes.toObject === 'function') {
+          vObj.attributes = vObj.attributes.toObject();
+        } else if (typeof vObj.attributes === 'object') {
+          if (vObj.attributes.constructor?.name === 'MongooseMap') {
+            vObj.attributes = Object.fromEntries(vObj.attributes);
+          }
+        }
+      }
+      
+      if (storePercentage > 0) {
         if (vObj.price != null) {
           vObj.price = Number((vObj.price * (1 + storePercentage / 100)).toFixed(2));
         }
         if (vObj.mrp != null) {
           vObj.mrp = Number((vObj.mrp * (1 + storePercentage / 100)).toFixed(2));
         }
-        return vObj;
-      });
+      }
+      return vObj;
+    });
+  }
+
+  if (storePercentage > 0) {
+    obj.price = Number((obj.price * (1 + storePercentage / 100)).toFixed(2));
+    if (obj.mrp != null) {
+      obj.mrp = Number((obj.mrp * (1 + storePercentage / 100)).toFixed(2));
     }
   }
   return obj;
