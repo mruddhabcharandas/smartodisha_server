@@ -345,8 +345,17 @@ router.get("/customers", auth, requirePermission("customers"), async (req, res) 
       { phone: { $regex: String(q), $options: "i" } }
     ];
   }
-  const items = await Customer.find(filter).sort({ createdAt: -1 });
-  res.json(items);
+  const items = await Customer.find(filter).sort({ createdAt: -1 }).lean();
+  
+  const Order = (await import("../models/Order.js")).default;
+  const itemsWithOrderCount = await Promise.all(
+    items.map(async (c) => {
+      const orderCount = await Order.countDocuments({ "customer.phone": c.phone });
+      return { ...c, orderCount };
+    })
+  );
+  
+  res.json(itemsWithOrderCount);
 });
 
 router.get("/customers/:id", auth, requirePermission("customers"), async (req, res) => {

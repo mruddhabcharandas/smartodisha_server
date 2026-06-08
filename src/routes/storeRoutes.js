@@ -552,6 +552,25 @@ router.post("/orders/:id/shiprocket/create", protect, async (req, res) => {
     const weightKg = totalWeightGrams > 0 ? (totalWeightGrams / 1000) : 0.5;
     const cleanPhone = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
 
+    const client = createShiprocketClient({ email: srEmail, password: srPassword });
+    
+    // Dynamically resolve pickup location name from Shiprocket account
+    try {
+      const locationsRes = await client.get("/settings/company/pickup");
+      const locations = locationsRes.data?.data?.shipping_address || [];
+      if (locations.length > 0) {
+        const matchedLoc = locations.find(loc => String(loc.pin_code || loc.pincode || "") === String(pickupPincode));
+        if (matchedLoc) {
+          pickupLocation = matchedLoc.pickup_location;
+        } else {
+          pickupLocation = locations[0].pickup_location;
+        }
+        console.log("Dynamically resolved Shiprocket pickup location nickname for store order:", pickupLocation);
+      }
+    } catch (locErr) {
+      console.error("Failed to fetch Shiprocket pickup locations for store, falling back to:", pickupLocation, locErr.message);
+    }
+
     const shipment = {
       order_id: order._id.toString(),
       order_date: new Date().toISOString().split('T')[0],
@@ -580,7 +599,6 @@ router.post("/orders/:id/shiprocket/create", protect, async (req, res) => {
       weight: weightKg
     };
 
-    const client = createShiprocketClient({ email: srEmail, password: srPassword });
     const { data } = await client.post("/orders/create/adhoc", shipment);
 
     const awb = data.awb_code;
