@@ -59,6 +59,10 @@ app.use(cors({
 app.use(express.json());
 app.use(morgan("dev"));
 
+// Serve static files (for local uploads fallback)
+const publicDir = path.resolve(__dirname, "../public");
+app.use(express.static(publicDir));
+
 app.get("/api/health", (req, res) => {
   res.json({ status: "uddhab das", time: new Date().toISOString() });
 });

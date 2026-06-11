@@ -643,32 +643,93 @@ router.post("/orders/:id/shiprocket/create", protect, async (req, res) => {
 router.get("/orders/:id/shiprocket/label/:awb", protect, async (req, res) => {
   const awb = req.params.awb;
   try {
-    const order = await Order.findOne({ _id: req.params.id, store: req.store._id }).lean();
+    const order = await Order.findOne({ _id: req.params.id, store: req.store._id });
     if (!order) return res.status(404).json({ error: "order_not_found" });
 
-    const PDFDocument = (await import("pdfkit")).default;
-    const doc = new PDFDocument({ margin: 24, size: "A6" });
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
-    doc.pipe(res);
-    doc.fontSize(16).text("Shipping Label", { align: "center" });
-    doc.moveDown(0.5);
-    doc.fontSize(12).text(`Waybill: ${awb}`);
-    doc.moveDown(0.5);
-    doc.fontSize(12).text(`Name: ${order.customer?.name || ""}`);
-    doc.fontSize(10).text(`Phone: ${order.customer?.phone || ""}`);
-    const a = order.shippingAddress || {};
-    const line1 = [a.line1, a.line2].filter(Boolean).join(", ");
-    doc.moveDown(0.5);
-    doc.fontSize(10).text(line1);
-    doc.fontSize(10).text(`${a.city || ""}, ${a.state || ""} - ${a.pincode || ""}`);
-    doc.moveDown(0.5);
-    doc.fontSize(10).text(`Items: ${order.items?.length || 0}`);
-    doc.fontSize(12).text(`Amount: ₹${Number(order.totalEstimate || 0).toLocaleString("en-IN")}`);
-    doc.end();
+    // Get store credentials
+    const storeId = order.store;
+    let srEmail = process.env.SHIPROCKET_EMAIL;
+    let srPassword = process.env.SHIPROCKET_PASSWORD;
+    if (storeId) {
+      const storeObj = await Store.findById(storeId).select("shiprocketEmail shiprocketPassword");
+      if (storeObj?.shiprocketEmail && storeObj?.shiprocketPassword) {
+        srEmail = storeObj.shiprocketEmail;
+        srPassword = storeObj.shiprocketPassword;
+      }
+    }
+
+    // Get Shiprocket client
+    const { createShiprocketClient } = await import("../lib/shiprocket.js");
+    const client = createShiprocketClient({ email: srEmail, password: srPassword });
+
+    // Call Shiprocket's generate label API
+    const labelResponse = await client.post("/orders/courier/generate/label", {
+      awb: [awb]
+    });
+
+    // If we get a PDF URL, redirect or stream it!
+    if (labelResponse.data?.label_url) {
+      // Option 1: Redirect to Shiprocket's URL
+      return res.redirect(labelResponse.data.label_url);
+    } else if (labelResponse.data?.pdf_data) {
+      // Option 2: Stream directly if available as base64 or buffer
+      const pdfBuffer = Buffer.from(labelResponse.data.pdf_data, 'base64');
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
+      return res.send(pdfBuffer);
+    } else {
+      // Fallback to Shiprocket's label endpoint if needed
+      const trackingResponse = await client.get(`/courier/track/awb/${awb}`);
+      // If nothing else, try another approach or fall back
+      const PDFDocument = (await import("pdfkit")).default;
+      const doc = new PDFDocument({ margin: 24, size: "A6" });
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
+      doc.pipe(res);
+      doc.fontSize(16).text("Shipping Label", { align: "center" });
+      doc.moveDown(0.5);
+      doc.fontSize(12).text(`Waybill: ${awb}`);
+      doc.moveDown(0.5);
+      doc.fontSize(12).text(`Name: ${order.customer?.name || ""}`);
+      doc.fontSize(10).text(`Phone: ${order.customer?.phone || ""}`);
+      const a = order.shippingAddress || {};
+      const line1 = [a.line1, a.line2].filter(Boolean).join(", ");
+      doc.moveDown(0.5);
+      doc.fontSize(10).text(line1);
+      doc.fontSize(10).text(`${a.city || ""}, ${a.state || ""} - ${a.pincode || ""}`);
+      doc.moveDown(0.5);
+      doc.fontSize(10).text(`Items: ${order.items?.length || 0}`);
+      doc.fontSize(12).text(`Amount: ₹${Number(order.totalEstimate || 0).toLocaleString("en-IN")}`);
+      doc.end();
+    }
   } catch (err) {
-    console.error("Seller shiprocket label failed:", err);
-    res.status(500).json({ error: "label_generation_failed" });
+    console.error("Seller shiprocket label failed:", err.response?.data || err.message);
+    // Fallback to custom PDF if Shiprocket fails
+    try {
+      const order = await Order.findOne({ _id: req.params.id, store: req.store._id }).lean();
+      const PDFDocument = (await import("pdfkit")).default;
+      const doc = new PDFDocument({ margin: 24, size: "A6" });
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
+      doc.pipe(res);
+      doc.fontSize(16).text("Shipping Label", { align: "center" });
+      doc.moveDown(0.5);
+      doc.fontSize(12).text(`Waybill: ${awb}`);
+      doc.moveDown(0.5);
+      doc.fontSize(12).text(`Name: ${order.customer?.name || ""}`);
+      doc.fontSize(10).text(`Phone: ${order.customer?.phone || ""}`);
+      const a = order.shippingAddress || {};
+      const line1 = [a.line1, a.line2].filter(Boolean).join(", ");
+      doc.moveDown(0.5);
+      doc.fontSize(10).text(line1);
+      doc.fontSize(10).text(`${a.city || ""}, ${a.state || ""} - ${a.pincode || ""}`);
+      doc.moveDown(0.5);
+      doc.fontSize(10).text(`Items: ${order.items?.length || 0}`);
+      doc.fontSize(12).text(`Amount: ₹${Number(order.totalEstimate || 0).toLocaleString("en-IN")}`);
+      doc.end();
+    } catch (fallbackErr) {
+      res.status(500).json({ error: "label_generation_failed", message: fallbackErr.message });
+    }
   }
 });
 

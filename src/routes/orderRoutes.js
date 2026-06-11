@@ -19,6 +19,7 @@ import { sendEmail, renderMail } from "../lib/mailer.js";
 import AuditLog from "../models/AuditLog.js";
 import { notifyAdmin } from "../lib/socket.js";
 import shiprocket, { checkServiceability, createShiprocketClient } from "../lib/shiprocket.js";
+import { getStoreShippingConfig, calculateShippingCost } from "../lib/shipping.js";
 
 const router = express.Router();
 
@@ -546,12 +547,12 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
 
     const { discount: coupDiscount, finalAmount: payableProductTotal } = await validateAndApplyCoupon(couponCode, totals.total);
 
-    // Calculate shipping cost - USING SAME LOGIC AS shippingRoutes /calculate endpoint!
+    // Calculate shipping cost - USING SHARED FUNCTION!
     let shippingCost = 0;
     let codCharge = 0;
+    let totalWeightGrams = 0;
     try {
       // Calculate total weight for shipping
-      let totalWeightGrams = 0;
       for (const it of items) {
         const p = products.find(x => x._id.toString() === it.productId.toString());
         if (p && p.weight) {
@@ -562,94 +563,23 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
       }
       
       const storeId = products[0]?.store?._id || products[0]?.store;
-      
-      // Let's get store credentials and pickup postcode
-      let origin = process.env.SHIPROCKET_PICKUP_PINCODE || "360001";
-      let srEmail = process.env.SHIPROCKET_EMAIL;
-      let srPassword = process.env.SHIPROCKET_PASSWORD;
-      
-      if (storeId) {
-        const storeObj = await Store.findById(storeId).select("shiprocketEmail shiprocketPassword pickupAddress");
-        if (storeObj) {
-          if (storeObj.shiprocketEmail && storeObj.shiprocketPassword) {
-            srEmail = storeObj.shiprocketEmail;
-            srPassword = storeObj.shiprocketPassword;
-          }
-          if (storeObj.pickupAddress?.pincode) {
-            origin = storeObj.pickupAddress.pincode;
-          }
-        }
-      }
+      const { origin, srEmail, srPassword } = await getStoreShippingConfig(storeId);
       
       const dest = deliveryAddress?.pincode || (cust.savedAddresses || []).find(a => a.isDefault)?.pincode || cust.kyc?.pincode;
-      const weight = totalWeightGrams > 0 ? totalWeightGrams / 1000 : 0.5;
       const orderAmount = totals.total; // Use original product total before coupon (matches shippingRoutes.js)
-      const paymentMethodForShipping = paymentMethod === "CASHFREE" ? "prepaid" : "cod";
       
-      let baseAmt = 85;
-      let selectedCourier = null;
-      let freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
+      const shippingInfo = await calculateShippingCost({
+        origin,
+        dest,
+        totalWeightGrams,
+        orderAmount,
+        paymentMethod,
+        srEmail,
+        srPassword
+      });
       
-      // FIRST TRY SHIPROCKET SERVICEABILITY (EXACTLY LIKE shippingRoutes)
-      try {
-        if (origin && dest) {
-          const response = await checkServiceability({
-            pickup_postcode: origin,
-            delivery_postcode: dest,
-            weight,
-            cod: paymentMethod === "COD"
-          }, { email: srEmail, password: srPassword });
-          
-          const data = response.data;
-          const courierList = data?.data?.available_courier_companies
-            || data?.data?.couriers
-            || data?.couriers
-            || [];
-
-          // findBestCourier function (EXACTLY FROM shippingRoutes)
-          const findBestCourier = (couriers) => {
-            if (!Array.isArray(couriers)) return null;
-            const delhivery = couriers.find(c => 
-              String(c.name || c.courier_name || c.courier || '').toLowerCase().includes('delhivery')
-            );
-            if (delhivery) return delhivery;
-            const blueDart = couriers.find(c => 
-              String(c.name || c.courier_name || c.courier || '').toLowerCase().includes('blue dart') ||
-              String(c.name || c.courier_name || c.courier || '').toLowerCase().includes('bluedart')
-            );
-            if (blueDart) return blueDart;
-            return couriers[0];
-          };
-          
-          if (Array.isArray(courierList) && courierList.length) {
-            selectedCourier = findBestCourier(courierList);
-          }
-
-          baseAmt = Number(
-            selectedCourier?.rate
-            || selectedCourier?.freight_charge
-            || data?.data?.available_courier_companies?.[0]?.rate
-            || data?.rate
-            || process.env.SHIPPING_BASE_CHARGE
-            || 85
-          );
-        }
-      } catch {
-        // Fallback calculation (EXACTLY FROM shippingRoutes)
-        const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
-        const perKg = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
-        const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
-        const variable = perKg * weight;
-        baseAmt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
-      }
-      
-      const isPrepaidFree = orderAmount >= freeDeliveryAbove && paymentMethodForShipping === 'prepaid';
-      shippingCost = isPrepaidFree ? 0 : baseAmt;
-      
-      // COD charge calculation (EXACTLY FROM shippingRoutes)
-      if (paymentMethod === "COD") {
-        codCharge = Math.min(Math.max(Math.round(orderAmount * 0.05), 40), 100);
-      }
+      shippingCost = shippingInfo.deliveryCharge;
+      codCharge = shippingInfo.codCharge;
     } catch (e) {
       console.error("Shipping calculation failed, using default:", e.message);
       const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);

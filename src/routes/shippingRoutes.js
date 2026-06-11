@@ -8,6 +8,7 @@ import { auth, requireRole, requirePermission } from "../middleware/auth.js";
 import shiprocket, { checkServiceability, createShiprocketClient } from "../lib/shiprocket.js";
 import PDFDocument from "pdfkit";
 import axios from "axios";
+import { findBestCourier, getStoreShippingConfig, calculateShippingCost } from "../lib/shipping.js";
 
 const router = express.Router();
 
@@ -22,8 +23,6 @@ const _getCache = (key) => {
   return it.data;
 };
 
-
-
 // Helper to find best courier (prioritize Delhivery, then Blue Dart)
 const getStoreShiprocketCreds = async (storeId) => {
   if (!storeId || !mongoose.isValidObjectId(storeId)) return {};
@@ -36,26 +35,6 @@ const getStoreShiprocketCreds = async (storeId) => {
   } catch {
     return {};
   }
-};
-
-const findBestCourier = (couriers) => {
-  if (!Array.isArray(couriers)) return null;
-  
-  // Priority 1: Delhivery
-  const delhivery = couriers.find(c => 
-    String(c.name || c.courier_name || c.courier || '').toLowerCase().includes('delhivery')
-  );
-  if (delhivery) return delhivery;
-  
-  // Priority 2: Blue Dart
-  const blueDart = couriers.find(c => 
-    String(c.name || c.courier_name || c.courier || '').toLowerCase().includes('blue dart') ||
-    String(c.name || c.courier_name || c.courier || '').toLowerCase().includes('bluedart')
-  );
-  if (blueDart) return blueDart;
-  
-  // Fallback: first available
-  return couriers[0];
 };
 
 router.get("/check-pincode", async (req, res) => {
@@ -141,99 +120,75 @@ router.get("/check-pincode", async (req, res) => {
 
 router.post("/calculate", async (req, res) => {
   const storeId = req.body.store_id;
-  let origin = String(req.body?.source_pin || process.env.SHIPROCKET_PICKUP_PINCODE || "360001").trim();
-  
-  const { email: srEmail, password: srPassword, store } = await getStoreShiprocketCreds(storeId);
-  if (store?.pickupAddress?.pincode) {
-    origin = store.pickupAddress.pincode;
-  }
+  const { origin, srEmail, srPassword } = await getStoreShippingConfig(storeId);
 
   const dest = String(req.body?.destination_pin || "").trim();
   const weightGrams = Number(req.body?.weight || 0);
-  const weight = weightGrams > 0 ? weightGrams / 1000 : 0.5;
   const order_amount = Number(req.body?.order_amount || 0);
   const payment_method = String(req.body?.payment_method || "prepaid").toLowerCase();
+  const paymentMethod = payment_method === "cod" ? "COD" : "CASHFREE";
+  
   if (!origin || !dest) return res.status(400).json({ error: "missing_pins" });
   
   try {
-    const response = await checkServiceability({
-      pickup_postcode: origin,
-      delivery_postcode: dest,
-      weight,
-      cod: payment_method === "cod"
-    }, { email: srEmail, password: srPassword });
-    const data = response.data;
+    const shippingInfo = await calculateShippingCost({
+      origin,
+      dest,
+      totalWeightGrams: weightGrams,
+      orderAmount: order_amount,
+      paymentMethod,
+      srEmail,
+      srPassword
+    });
 
-    let selectedCourier = null;
-    const courierList = data?.data?.available_courier_companies
-      || data?.data?.couriers
-      || data?.couriers
-      || [];
-    if (Array.isArray(courierList) && courierList.length) {
-      selectedCourier = findBestCourier(courierList);
-    }
-
-    const baseAmt = Number(
-      selectedCourier?.rate
-      || selectedCourier?.freight_charge
-      || data?.data?.available_courier_companies?.[0]?.rate
-      || data?.rate
-      || process.env.SHIPPING_BASE_CHARGE
-      || 85
-    );
     const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
-    const isPrepaidFree = order_amount >= freeDeliveryAbove && payment_method === 'prepaid';
-    const deliveryCharge = isPrepaidFree ? 0 : baseAmt;
-    // COD charge: 5% or min ₹40, max ₹100
-    const codCharge = payment_method === "cod" ? Math.min(Math.max(Math.round(order_amount * 0.05), 40), 100) : 0;
-    const final = deliveryCharge + codCharge;
-    const codAvailable = order_amount <= 2000;
+
     res.json({
       origin,
       destination: dest,
-      weight,
+      weight: shippingInfo.weight,
       order_amount,
       payment_method,
-      amount: baseAmt,
-      discount: isPrepaidFree ? baseAmt : 0,
-      final,
-      label: final === 0 && payment_method === 'prepaid' ? "FREE DELIVERY" : `₹${final} Delivery`,
-      delivery_charge: deliveryCharge,
-      final_charge: final,
+      amount: shippingInfo.baseAmt,
+      discount: shippingInfo.isFreeDelivery ? shippingInfo.baseAmt : 0,
+      final: shippingInfo.finalCharge,
+      label: shippingInfo.finalCharge === 0 && payment_method === 'prepaid' ? "FREE DELIVERY" : `₹${shippingInfo.finalCharge} Delivery`,
+      delivery_charge: shippingInfo.deliveryCharge,
+      final_charge: shippingInfo.finalCharge,
       free_delivery_above: freeDeliveryAbove,
-      cod_available: codAvailable,
-      cod_charge: codCharge,
-      selected_courier: selectedCourier?.name || 'Delhivery'
+      cod_available: shippingInfo.codAvailable,
+      cod_charge: shippingInfo.codCharge,
+      selected_courier: shippingInfo.selectedCourier
     });
   } catch {
-    const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
-    const perKg = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
-    const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
-    const variable = perKg * weight;
-    const baseAmt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
+    const fallbackShippingInfo = await calculateShippingCost({
+      origin,
+      dest: null,
+      totalWeightGrams: weightGrams,
+      orderAmount: order_amount,
+      paymentMethod,
+      srEmail,
+      srPassword
+    });
+
     const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
-    const isPrepaidFree = order_amount >= freeDeliveryAbove && payment_method === 'prepaid';
-    const deliveryCharge = isPrepaidFree ? 0 : baseAmt;
-    // COD charge: 5% or min ₹40, max ₹100
-    const codCharge = payment_method === "cod" ? Math.min(Math.max(Math.round(order_amount * 0.05), 40), 100) : 0;
-    const final = deliveryCharge + codCharge;
-    const codAvailable = order_amount <= 2000;
+
     res.json({
       origin,
       destination: dest,
-      weight,
+      weight: fallbackShippingInfo.weight,
       order_amount,
       payment_method,
-      amount: baseAmt,
-      discount: isPrepaidFree ? baseAmt : 0,
-      final,
-      label: final === 0 && payment_method === 'prepaid' ? "FREE DELIVERY" : `₹${final} Delivery`,
-      delivery_charge: deliveryCharge,
-      final_charge: final,
+      amount: fallbackShippingInfo.baseAmt,
+      discount: fallbackShippingInfo.isFreeDelivery ? fallbackShippingInfo.baseAmt : 0,
+      final: fallbackShippingInfo.finalCharge,
+      label: fallbackShippingInfo.finalCharge === 0 && payment_method === 'prepaid' ? "FREE DELIVERY" : `₹${fallbackShippingInfo.finalCharge} Delivery`,
+      delivery_charge: fallbackShippingInfo.deliveryCharge,
+      final_charge: fallbackShippingInfo.finalCharge,
       free_delivery_above: freeDeliveryAbove,
-      cod_available: codAvailable,
-      cod_charge: codCharge,
-      selected_courier: 'Delhivery'
+      cod_available: fallbackShippingInfo.codAvailable,
+      cod_charge: fallbackShippingInfo.codCharge,
+      selected_courier: fallbackShippingInfo.selectedCourier
     });
   }
 });
@@ -464,7 +419,7 @@ router.get("/shiprocket/track/:awb", async (req, res) => {
 
 router.get("/shiprocket/label/:awb", auth, requireRole(["admin", "seller"]), async (req, res) => {
   const awb = req.params.awb;
-  const order = await Order.findOne({ "shipping.waybill": awb }).lean();
+  const order = await Order.findOne({ "shipping.waybill": awb });
   
   if (!order) {
     return res.status(404).json({ error: "order_not_found" });
@@ -477,15 +432,72 @@ router.get("/shiprocket/label/:awb", auth, requireRole(["admin", "seller"]), asy
       return res.status(403).json({ error: "forbidden" });
     }
   }
-  
-  const doc = new PDFDocument({ margin: 24, size: "A6" });
-  res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
-  doc.pipe(res);
-  doc.fontSize(16).text("Shipping Label", { align: "center" });
-  doc.moveDown(0.5);
-  doc.fontSize(12).text(`Waybill: ${awb}`);
-  if (order) {
+
+  // Get store credentials
+  const storeId = order.store;
+  let srEmail = process.env.SHIPROCKET_EMAIL;
+  let srPassword = process.env.SHIPROCKET_PASSWORD;
+  if (storeId) {
+    const storeObj = await Store.findById(storeId).select("shiprocketEmail shiprocketPassword");
+    if (storeObj?.shiprocketEmail && storeObj?.shiprocketPassword) {
+      srEmail = storeObj.shiprocketEmail;
+      srPassword = storeObj.shiprocketPassword;
+    }
+  }
+
+  // Get Shiprocket client
+  const client = createShiprocketClient({ email: srEmail, password: srPassword });
+
+  try {
+    // Call Shiprocket's generate label API
+    const labelResponse = await client.post("/orders/courier/generate/label", {
+      awb: [awb]
+    });
+
+    // If we get a PDF URL, redirect or stream it!
+    if (labelResponse.data?.label_url) {
+      // Option 1: Redirect to Shiprocket's URL
+      return res.redirect(labelResponse.data.label_url);
+    } else if (labelResponse.data?.pdf_data) {
+      // Option 2: Stream directly if available as base64 or buffer
+      const pdfBuffer = Buffer.from(labelResponse.data.pdf_data, 'base64');
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
+      return res.send(pdfBuffer);
+    } else {
+      // Fallback if needed
+      const PDFDocument = (await import("pdfkit")).default;
+      const doc = new PDFDocument({ margin: 24, size: "A6" });
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
+      doc.pipe(res);
+      doc.fontSize(16).text("Shipping Label", { align: "center" });
+      doc.moveDown(0.5);
+      doc.fontSize(12).text(`Waybill: ${awb}`);
+      doc.moveDown(0.5);
+      doc.fontSize(12).text(`Name: ${order.customer?.name || ""}`);
+      doc.fontSize(10).text(`Phone: ${order.customer?.phone || ""}`);
+      const a = order.shippingAddress || {};
+      const line1 = [a.line1, a.line2].filter(Boolean).join(", ");
+      doc.moveDown(0.5);
+      doc.fontSize(10).text(line1);
+      doc.fontSize(10).text(`${a.city || ""}, ${a.state || ""} - ${a.pincode || ""}`);
+      doc.moveDown(0.5);
+      doc.fontSize(10).text(`Items: ${order.items?.length || 0}`);
+      doc.fontSize(12).text(`Amount: ₹${Number(order.totalEstimate || 0).toLocaleString("en-IN")}`);
+      doc.end();
+    }
+  } catch (err) {
+    console.error("Shipping label from Shiprocket failed, using fallback:", err.response?.data || err.message);
+    // Fallback to custom PDF
+    const PDFDocument = (await import("pdfkit")).default;
+    const doc = new PDFDocument({ margin: 24, size: "A6" });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
+    doc.pipe(res);
+    doc.fontSize(16).text("Shipping Label", { align: "center" });
+    doc.moveDown(0.5);
+    doc.fontSize(12).text(`Waybill: ${awb}`);
     doc.moveDown(0.5);
     doc.fontSize(12).text(`Name: ${order.customer?.name || ""}`);
     doc.fontSize(10).text(`Phone: ${order.customer?.phone || ""}`);
@@ -497,8 +509,8 @@ router.get("/shiprocket/label/:awb", auth, requireRole(["admin", "seller"]), asy
     doc.moveDown(0.5);
     doc.fontSize(10).text(`Items: ${order.items?.length || 0}`);
     doc.fontSize(12).text(`Amount: ₹${Number(order.totalEstimate || 0).toLocaleString("en-IN")}`);
+    doc.end();
   }
-  doc.end();
 });
 
 // Get tracking info for order
