@@ -112,13 +112,17 @@ export const calculateShippingCost = async ({
     : 0;
   
   const finalCharge = deliveryCharge + codCharge;
-  const codAvailable = orderAmount <= 2000;
+  const codLimit = Number(process.env.COD_MAX_LIMIT || 20000);
+  const codAvailable = orderAmount <= codLimit;
   
+  console.log(`[SHIPPING CALC] origin: ${origin}, dest: ${dest}, weight: ${weight}kg, orderAmount: ${orderAmount}, payment: ${paymentMethod} => finalCharge: ${finalCharge} (delivery: ${deliveryCharge}, cod: ${codCharge}, codAvailable: ${codAvailable})`);
+
   return {
     deliveryCharge,
     codCharge,
     finalCharge,
     codAvailable,
+    codLimit,
     isFreeDelivery: isPrepaidFree,
     selectedCourier: selectedCourier?.name || 'Delhivery',
     baseAmt,

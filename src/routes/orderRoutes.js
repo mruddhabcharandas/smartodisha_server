@@ -566,7 +566,7 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
       const { origin, srEmail, srPassword } = await getStoreShippingConfig(storeId);
       
       const dest = deliveryAddress?.pincode || (cust.savedAddresses || []).find(a => a.isDefault)?.pincode || cust.kyc?.pincode;
-      const orderAmount = totals.total; // Use original product total before coupon (matches shippingRoutes.js)
+      const orderAmount = payableProductTotal; // Use final product total after coupon
       
       const shippingInfo = await calculateShippingCost({
         origin,
@@ -591,6 +591,15 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
     }
 
     const totalPayable = Number((payableProductTotal + shippingCost + codCharge).toFixed(2));
+
+    console.log("=== PREPARE PAYMENT LOGS ===");
+    console.log("Totals.total (Pre-coupon):", totals.total);
+    console.log("Coupon Discount:", coupDiscount);
+    console.log("Payable Product Total (After coupon):", payableProductTotal);
+    console.log("Shipping Cost:", shippingCost);
+    console.log("COD Charge:", codCharge);
+    console.log("Total Payable:", totalPayable);
+    console.log("============================");
 
     const appId = process.env.CASHFREE_APP_ID || "";
     const isSandbox = appId.toUpperCase().startsWith("TEST");
@@ -983,58 +992,10 @@ router.post("/verify-payment", async (req, res) => {
     order.cashfreeSignature = cashfreeSignature;
     await order.save();
 
-    try {
-      await createBillFromData({
-        customerData: { phone: order.customer.phone, name: order.customer.name, email: order.customer.email },
-        items: order.items.map(it => ({
-          product: it.product,
-          variantSku: it.variantSku ? String(it.variantSku) : undefined,
-          quantity: it.quantity
-        })),
-        paymentType: "CASHFREE",
-        existingOrderId: order._id
-      });
-    } catch (err) {
-      console.error("Auto-billing failed after payment:", err);
-    }
+    // 4. Finalize order using shared logic
+    const finalized = await confirmAndFinalizeOrder(order, cashfreePaymentId, cashfreeSignature);
 
-    try {
-      await AuditLog.create({ actorId: "", actorRole: "system", type: "ORDER_STATUS", entityType: "ORDER", entityId: order._id.toString(), note: "Payment verified (CASHFREE)" });
-      const to = order.customer?.email || process.env.MAIL_TO || process.env.COMPANY_EMAIL || process.env.MAIL_FROM;
-      const html = renderMail({
-        heading: "Payment Confirmed",
-        subheading: "We’ve confirmed your payment and are preparing your shipment.",
-        highlight: `Order ID: ${order._id}`,
-        blocks: [
-          { label: "Payment Method", value: "CASHFREE" },
-          { label: "Amount Paid", value: `₹${Number(order.totalEstimate).toLocaleString("en-IN")}` },
-          { label: "Current Status", value: order.status }
-        ]
-      });
-      if (to) await sendEmail({ to, subject: `Payment confirmed - ${process.env.COMPANY_NAME || "SmartOdisha"}`, html });
-    } catch {}
-
-    try {
-      if (order.status === "CONFIRMED") {
-        const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
-        const perKg = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
-        const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
-        const weight = 0.5;
-        const variable = perKg * weight;
-        const amt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
-        order.shipping_charge = amt;
-        order.shipping_discount = amt;
-        await order.save();
-
-        const created = await tryCreateShiprocketShipment(order);
-        if (!created) {
-          order.shipment_status = "CREATION_FAILED";
-          await order.save();
-        }
-      }
-    } catch {}
-
-    res.json({ success: true, message: "payment_verified" });
+    res.json({ success: true, message: "payment_verified", order: finalized });
   } else {
     res.status(400).json({ error: "invalid_signature" });
   }

@@ -52,14 +52,15 @@ router.get("/check-pincode", async (req, res) => {
   try {
     const cacheKey = `chk:${pincode}:${pickupPincode}`;
     const cached = _getCache(cacheKey);
-    let codAvailable = order_amount <= 2000;
+    const codLimit = Number(process.env.COD_MAX_LIMIT || 20000);
+    let codAvailable = order_amount <= codLimit;
     let deliveryAvailable = true;
     let eta = 3;
     let rate = 85;
     if (cached && cached.delivery_available) {
       return res.json({
         ...cached,
-        cod_available: order_amount <= 2000
+        cod_available: order_amount <= codLimit
       });
     }
     const weightKg = Math.max(0.5, Number(req.query.weight || 0) / 1000 || 0.5);
@@ -81,7 +82,7 @@ router.get("/check-pincode", async (req, res) => {
     
     // Default to true always!
     deliveryAvailable = true;
-    codAvailable = order_amount <= 2000;
+    codAvailable = order_amount <= codLimit;
     eta = selectedCourier?.eta || data?.eta || 3;
     rate = selectedCourier?.rate || data?.rate || 85;
     
@@ -93,6 +94,7 @@ router.get("/check-pincode", async (req, res) => {
       pincode,
       delivery_available: deliveryAvailable,
       cod_available: codAvailable,
+      cod_limit: codLimit,
       eta: eta,
       etaStart,
       etaEnd,
@@ -105,10 +107,12 @@ router.get("/check-pincode", async (req, res) => {
     console.error("Shiprocket serviceability failed:", e.response?.data || e.message);
     const now = new Date();
     const add = (d, n) => { const x = new Date(d.getTime()); x.setDate(x.getDate() + n); return x; };
+    const codLimit = Number(process.env.COD_MAX_LIMIT || 20000);
     res.status(200).json({
       pincode,
       delivery_available: true,
-      cod_available: order_amount <= 2000,
+      cod_available: order_amount <= codLimit,
+      cod_limit: codLimit,
       eta: 3,
       etaStart: add(now, 3).toISOString(),
       etaEnd: add(now, 5).toISOString(),
@@ -450,22 +454,45 @@ router.get("/shiprocket/label/:awb", auth, requireRole(["admin", "seller"]), asy
 
   try {
     // Call Shiprocket's generate label API
-    const labelResponse = await client.post("/orders/courier/generate/label", {
-      awb: [awb]
+    const labelResponse = await client.post("/courier/generate/label", {
+      awb_codes: [awb]
     });
 
-    // If we get a PDF URL, redirect or stream it!
+    console.log("Shiprocket label response:", JSON.stringify(labelResponse.data, null, 2));
+
+    // If we get a PDF URL, stream it directly!
     if (labelResponse.data?.label_url) {
-      // Option 1: Redirect to Shiprocket's URL
-      return res.redirect(labelResponse.data.label_url);
+      // Fetch the PDF from Shiprocket's URL
+      const axios = await import("axios");
+      const pdfResponse = await axios.default.get(labelResponse.data.label_url, {
+        responseType: "arraybuffer"
+      });
+
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
+      return res.send(Buffer.from(pdfResponse.data));
     } else if (labelResponse.data?.pdf_data) {
-      // Option 2: Stream directly if available as base64 or buffer
+      // Stream directly if available as base64
       const pdfBuffer = Buffer.from(labelResponse.data.pdf_data, 'base64');
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
       return res.send(pdfBuffer);
     } else {
-      // Fallback if needed
+      // Try Shiprocket's invoice endpoint
+      const invoiceResponse = await client.post("/orders/print/invoice", {
+        ids: [order.shiprocketOrderId || order._id]
+      });
+      if (invoiceResponse.data?.invoice_url) {
+        const axios = await import("axios");
+        const pdfResponse = await axios.default.get(invoiceResponse.data.invoice_url, {
+          responseType: "arraybuffer"
+        });
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `inline; filename=invoice_${awb}.pdf`);
+        return res.send(Buffer.from(pdfResponse.data));
+      }
+
+      // Fallback to custom PDF
       const PDFDocument = (await import("pdfkit")).default;
       const doc = new PDFDocument({ margin: 24, size: "A6" });
       res.setHeader("Content-Type", "application/pdf");

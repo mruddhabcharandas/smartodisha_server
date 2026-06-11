@@ -663,24 +663,45 @@ router.get("/orders/:id/shiprocket/label/:awb", protect, async (req, res) => {
     const client = createShiprocketClient({ email: srEmail, password: srPassword });
 
     // Call Shiprocket's generate label API
-    const labelResponse = await client.post("/orders/courier/generate/label", {
-      awb: [awb]
+    const labelResponse = await client.post("/courier/generate/label", {
+      awb_codes: [awb]
     });
 
-    // If we get a PDF URL, redirect or stream it!
+    console.log("Shiprocket label response:", JSON.stringify(labelResponse.data, null, 2));
+
+    // If we get a PDF URL, stream it directly!
     if (labelResponse.data?.label_url) {
-      // Option 1: Redirect to Shiprocket's URL
-      return res.redirect(labelResponse.data.label_url);
+      // Fetch the PDF from Shiprocket's URL
+      const axios = await import("axios");
+      const pdfResponse = await axios.default.get(labelResponse.data.label_url, {
+        responseType: "arraybuffer"
+      });
+
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
+      return res.send(Buffer.from(pdfResponse.data));
     } else if (labelResponse.data?.pdf_data) {
-      // Option 2: Stream directly if available as base64 or buffer
+      // Stream directly if available as base64
       const pdfBuffer = Buffer.from(labelResponse.data.pdf_data, 'base64');
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
       return res.send(pdfBuffer);
     } else {
-      // Fallback to Shiprocket's label endpoint if needed
-      const trackingResponse = await client.get(`/courier/track/awb/${awb}`);
-      // If nothing else, try another approach or fall back
+      // Try Shiprocket's invoice endpoint
+      const invoiceResponse = await client.post("/orders/print/invoice", {
+        ids: [order.shiprocketOrderId || order._id]
+      });
+      if (invoiceResponse.data?.invoice_url) {
+        const axios = await import("axios");
+        const pdfResponse = await axios.default.get(invoiceResponse.data.invoice_url, {
+          responseType: "arraybuffer"
+        });
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `inline; filename=invoice_${awb}.pdf`);
+        return res.send(Buffer.from(pdfResponse.data));
+      }
+
+      // Fallback to custom PDF
       const PDFDocument = (await import("pdfkit")).default;
       const doc = new PDFDocument({ margin: 24, size: "A6" });
       res.setHeader("Content-Type", "application/pdf");
