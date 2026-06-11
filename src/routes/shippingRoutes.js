@@ -462,9 +462,22 @@ router.get("/shiprocket/track/:awb", async (req, res) => {
   }
 });
 
-router.get("/shiprocket/label/:awb", auth, requirePermission("orders"), async (req, res) => {
+router.get("/shiprocket/label/:awb", auth, requireRole(["admin", "seller"]), async (req, res) => {
   const awb = req.params.awb;
   const order = await Order.findOne({ "shipping.waybill": awb }).lean();
+  
+  if (!order) {
+    return res.status(404).json({ error: "order_not_found" });
+  }
+  
+  // Check access if seller
+  if (req.user.role === "seller") {
+    const store = await Store.findOne({ user: req.user.id });
+    if (!store || order.store.toString() !== store._id.toString()) {
+      return res.status(403).json({ error: "forbidden" });
+    }
+  }
+  
   const doc = new PDFDocument({ margin: 24, size: "A6" });
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);

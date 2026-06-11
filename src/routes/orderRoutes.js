@@ -168,8 +168,8 @@ const tryCreateShiprocketShipment = async (order) => {
       billing_phone: cleanPhone,
       shipping_is_billing: true,
       order_items: orderItems,
-      payment_method: "Prepaid",
-      shipping_charges: 0,
+      payment_method: order.paymentMethod === "COD" ? "COD" : "Prepaid",
+      shipping_charges: Number(order.shippingCost || 0),
       giftwrap_charges: 0,
       transaction_charges: 0,
       total_discount: Number(order.couponDiscount || 0),
@@ -546,7 +546,7 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
 
     const { discount: coupDiscount, finalAmount: payableProductTotal } = await validateAndApplyCoupon(couponCode, totals.total);
 
-    // Calculate shipping cost
+    // Calculate shipping cost - USING SAME LOGIC AS shippingRoutes /calculate endpoint!
     let shippingCost = 0;
     let codCharge = 0;
     try {
@@ -583,25 +583,31 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
       
       const dest = deliveryAddress?.pincode || (cust.savedAddresses || []).find(a => a.isDefault)?.pincode || cust.kyc?.pincode;
       const weight = totalWeightGrams > 0 ? totalWeightGrams / 1000 : 0.5;
+      const orderAmount = payableProductTotal;
+      const paymentMethodForShipping = paymentMethod === "CASHFREE" ? "prepaid" : "cod";
       
       let baseAmt = 85;
-      if (dest) {
-        try {
+      let selectedCourier = null;
+      let freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
+      
+      // FIRST TRY SHIPROCKET SERVICEABILITY (EXACTLY LIKE shippingRoutes)
+      try {
+        if (origin && dest) {
           const response = await checkServiceability({
             pickup_postcode: origin,
             delivery_postcode: dest,
             weight,
             cod: paymentMethod === "COD"
           }, { email: srEmail, password: srPassword });
-          const serviceabilityData = response.data;
           
-          let selectedCourier = null;
-          const courierList = serviceabilityData?.data?.available_courier_companies
-            || serviceabilityData?.data?.couriers
-            || serviceabilityData?.couriers
+          const data = response.data;
+          const courierList = data?.data?.available_courier_companies
+            || data?.data?.couriers
+            || data?.couriers
             || [];
-          
-          const findBestCourierLocal = (couriers) => {
+
+          // findBestCourier function (EXACTLY FROM shippingRoutes)
+          const findBestCourier = (couriers) => {
             if (!Array.isArray(couriers)) return null;
             const delhivery = couriers.find(c => 
               String(c.name || c.courier_name || c.courier || '').toLowerCase().includes('delhivery')
@@ -616,26 +622,20 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
           };
           
           if (Array.isArray(courierList) && courierList.length) {
-            selectedCourier = findBestCourierLocal(courierList);
+            selectedCourier = findBestCourier(courierList);
           }
-          
+
           baseAmt = Number(
             selectedCourier?.rate
             || selectedCourier?.freight_charge
-            || serviceabilityData?.data?.available_courier_companies?.[0]?.rate
-            || serviceabilityData?.rate
+            || data?.data?.available_courier_companies?.[0]?.rate
+            || data?.rate
             || process.env.SHIPPING_BASE_CHARGE
             || 85
           );
-        } catch (err) {
-          console.error("prepare-payment Shiprocket serviceability error:", err.message);
-          const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
-          const perKg = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
-          const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
-          const variable = perKg * weight;
-          baseAmt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
         }
-      } else {
+      } catch {
+        // Fallback calculation (EXACTLY FROM shippingRoutes)
         const base = Number(process.env.SHIPPING_BASE_CHARGE || 0);
         const perKg = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
         const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
@@ -643,11 +643,12 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
         baseAmt = Math.max(minCharge, Math.round((base + variable) * 100) / 100);
       }
       
-      const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
-      const isPrepaidFree = payableProductTotal >= freeDeliveryAbove && paymentMethod === 'CASHFREE';
+      const isPrepaidFree = orderAmount >= freeDeliveryAbove && paymentMethodForShipping === 'prepaid';
       shippingCost = isPrepaidFree ? 0 : baseAmt;
+      
+      // COD charge calculation (EXACTLY FROM shippingRoutes)
       if (paymentMethod === "COD") {
-        codCharge = Math.min(Math.max(Math.round(payableProductTotal * 0.05), 40), 100);
+        codCharge = Math.min(Math.max(Math.round(orderAmount * 0.05), 40), 100);
       }
     } catch (e) {
       console.error("Shipping calculation failed, using default:", e.message);
@@ -1112,7 +1113,11 @@ router.post("/verify-payment", async (req, res) => {
 router.get("/my-orders", async (req, res) => {
   const { phone } = req.query;
   if (!phone) return res.status(400).json({ error: "missing_phone" });
-  const items = await Order.find({ "customer.phone": phone }).sort({ createdAt: -1 });
+  const items = await Order.find({ 
+    "customer.phone": phone, 
+    paymentStatus: { $ne: "FAILED" },
+    status: { $nin: ["PENDING", "PENDING_PAYMENT"] }
+  }).sort({ createdAt: -1 });
   res.json(items);
 });
 
@@ -1145,7 +1150,11 @@ router.get("/my", auth, requireRole("customer"), async (req, res) => {
       orClauses.push({ "customer.email": email });
     }
 
-    const items = await Order.find({ $or: orClauses }).sort({ createdAt: -1 });
+    const items = await Order.find({ 
+      $or: orClauses, 
+      paymentStatus: { $ne: "FAILED" },
+      status: { $nin: ["PENDING", "PENDING_PAYMENT"] }
+    }).sort({ createdAt: -1 });
     res.json(items);
   } catch (err) {
     console.error("Failed to fetch customer orders list:", err);

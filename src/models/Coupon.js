@@ -12,6 +12,7 @@ const couponSchema = new mongoose.Schema(
     maxDiscount: { type: Number, default: 0 }, // 0 = no max
     minOrderValue: { type: Number, default: 0 }, // min amount to apply
     isActive: { type: Boolean, default: true },
+    isPublic: { type: Boolean, default: true }, // Show to users in checkout
     partner: { type: mongoose.Schema.Types.ObjectId, ref: "Partner" },
     partnerName: { type: String, default: "" },
     partnerEmail: { type: String, default: "" },

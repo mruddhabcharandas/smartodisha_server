@@ -280,8 +280,12 @@ router.get("/products/:id", protect, async (req, res) => {
 // Get store orders
 router.get("/orders", protect, async (req, res) => {
   try {
-    // Now we can just find orders where store matches
-    const orders = await Order.find({ store: req.store._id }).sort({ createdAt: -1 });
+    // Now we can just find orders where store matches, exclude pending/pending_payment/failed
+    const orders = await Order.find({ 
+      store: req.store._id,
+      paymentStatus: { $ne: "FAILED" },
+      status: { $nin: ["PENDING", "PENDING_PAYMENT"] }
+    }).sort({ createdAt: -1 });
     res.json(orders);
   } catch (err) {
     console.error(err);

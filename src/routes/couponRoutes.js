@@ -13,6 +13,7 @@ router.get("/available", async (req, res) => {
     const now = new Date();
     const coupons = await Coupon.find({
       isActive: true,
+      isPublic: true,
       expiryDate: { $gte: now },
       $or: [
         { usageLimit: 0 },
@@ -28,7 +29,7 @@ router.get("/available", async (req, res) => {
 
 router.post("/", auth, requireRole("admin"), async (req, res) => {
   const code = toUpper(req.body?.code);
-  const { type, value, minAmount, minOrderValue, maxDiscount, expiryDate, usageLimit, partnerId, partnerName, partnerEmail, partnerPhone, partnerCommissionPercent, maxTotalSales, isActive, password } = req.body || {};
+  const { type, value, minAmount, minOrderValue, maxDiscount, expiryDate, usageLimit, partnerId, partnerName, partnerEmail, partnerPhone, partnerCommissionPercent, maxTotalSales, isActive, isPublic, password } = req.body || {};
   if (!code || !type || value == null || !expiryDate) return res.status(400).json({ error: "missing_fields" });
   const exists = await Coupon.findOne({ code });
   if (exists) return res.status(409).json({ error: "duplicate_code" });
@@ -61,7 +62,8 @@ router.post("/", auth, requireRole("admin"), async (req, res) => {
     partnerCommissionPercent: Number(partnerCommissionPercent || 0),
     maxTotalSales: Number(maxTotalSales || 0),
     password: password ? String(password).trim() : undefined,
-    isActive: isActive === false ? false : true
+    isActive: isActive === false ? false : true,
+    isPublic: isPublic === false ? false : true
   });
   res.status(201).json(doc);
 });
@@ -89,6 +91,7 @@ router.put("/:id", auth, requireRole("admin"), async (req, res) => {
   if (req.body?.expiryDate) payload.expiryDate = new Date(req.body.expiryDate);
   if (req.body?.usageLimit != null) payload.usageLimit = Number(req.body.usageLimit);
   if (req.body?.isActive != null) payload.isActive = !!req.body.isActive;
+  if (req.body?.isPublic != null) payload.isPublic = !!req.body.isPublic;
   if (req.body?.partnerName != null) payload.partnerName = req.body.partnerName;
   if (req.body?.partnerEmail != null) payload.partnerEmail = req.body.partnerEmail;
   if (req.body?.partnerPhone != null) payload.partnerPhone = req.body.partnerPhone;
