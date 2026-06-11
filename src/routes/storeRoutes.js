@@ -688,46 +688,45 @@ router.get("/orders/:id/shiprocket/label/:awb", protect, async (req, res) => {
       return res.send(pdfBuffer);
     }
 
-      // Fallback to custom PDF (simple shipping label only)
-      const PDFDocument = (await import("pdfkit")).default;
-      const doc = new PDFDocument({ margin: 24, size: "A6" });
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
-      doc.pipe(res);
-      
-      doc.fontSize(18).text("SHIPPING LABEL", { align: "center", underline: true });
+    // Fallback to custom PDF (simple shipping label only)
+    const PDFDocument = (await import("pdfkit")).default;
+    const doc = new PDFDocument({ margin: 24, size: "A6" });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
+    doc.pipe(res);
+    
+    doc.fontSize(18).text("SHIPPING LABEL", { align: "center", underline: true });
+    doc.moveDown(0.5);
+    if (awb) {
+      doc.fontSize(14).text(`AWB: ${awb}`, { align: "center" });
       doc.moveDown(0.5);
-      if (awb) {
-        doc.fontSize(14).text(`AWB: ${awb}`, { align: "center" });
-        doc.moveDown(0.5);
-      }
-
-      // Customer Info
-      doc.fontSize(12).text("SHIP TO:", { underline: true });
-      doc.fontSize(10);
-      doc.text(`Name: ${order.customer?.name || ""}`);
-      doc.text(`Phone: ${order.customer?.phone || ""}`);
-      const a = order.shippingAddress || {};
-      const addressParts = [a.line1, a.line2].filter(Boolean);
-      if (addressParts.length) doc.text(addressParts.join(", "));
-      const cityState = [a.city, a.state, a.pincode].filter(Boolean).join(", ");
-      if (cityState) doc.text(cityState);
-      
-      doc.moveDown(0.5);
-
-      // Items (simple list)
-      doc.fontSize(12).text("ITEMS:", { underline: true });
-      doc.fontSize(9);
-      (order.items || []).forEach((item, idx) => {
-        const sku = item.variantSku || item.sku || "N/A";
-        doc.text(`${idx + 1}. ${item.name} (SKU: ${sku}) x ${item.quantity}`);
-      });
-
-      doc.moveDown(0.5);
-      doc.fontSize(12).text(`Order Amount: ₹${Number(order.totalEstimate || 0).toLocaleString("en-IN")}`, { align: "right" });
-      
-      doc.end();
     }
+
+    // Customer Info
+    doc.fontSize(12).text("SHIP TO:", { underline: true });
+    doc.fontSize(10);
+    doc.text(`Name: ${order.customer?.name || ""}`);
+    doc.text(`Phone: ${order.customer?.phone || ""}`);
+    const a = order.shippingAddress || {};
+    const addressParts = [a.line1, a.line2].filter(Boolean);
+    if (addressParts.length) doc.text(addressParts.join(", "));
+    const cityState = [a.city, a.state, a.pincode].filter(Boolean).join(", ");
+    if (cityState) doc.text(cityState);
+    
+    doc.moveDown(0.5);
+
+    // Items (simple list)
+    doc.fontSize(12).text("ITEMS:", { underline: true });
+    doc.fontSize(9);
+    (order.items || []).forEach((item, idx) => {
+      const sku = item.variantSku || item.sku || "N/A";
+      doc.text(`${idx + 1}. ${item.name} (SKU: ${sku}) x ${item.quantity}`);
+    });
+
+    doc.moveDown(0.5);
+    doc.fontSize(12).text(`Order Amount: ₹${Number(order.totalEstimate || 0).toLocaleString("en-IN")}`, { align: "right" });
+    
+    doc.end();
   } catch (err) {
     console.error("Seller shiprocket label failed:", err.response?.data || err.message);
     // Fallback to custom PDF if Shiprocket fails (simple shipping label only)
