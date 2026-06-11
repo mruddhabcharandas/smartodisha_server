@@ -975,17 +975,35 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
 router.get("/my/:id", auth, requireRole("customer"), async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
   try {
-    const cust = await Customer.findById(req.user.id).select("phone email");
+    const cust = await Customer.findById(req.user.id).select("phone email savedAddresses");
     if (!cust) return res.status(404).json({ error: "customer_not_found" });
 
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ error: "not_found" });
 
-    // Verify ownership via phone matching
+    // Verify ownership via phone matching or email or savedAddresses phones
     const orderPhoneClean = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
-    const custPhoneClean = String(cust.phone || "").replace(/\D/g, "").slice(-10);
+    const orderPhoneRaw = String(order.customer.phone || "").trim();
+    const orderEmail = String(order.customer.email || "").trim().toLowerCase();
 
-    if (orderPhoneClean !== custPhoneClean) {
+    const custPhones = new Set();
+    if (cust.phone) {
+      custPhones.add(String(cust.phone).trim());
+      custPhones.add(String(cust.phone).replace(/\D/g, "").slice(-10));
+    }
+    (cust.savedAddresses || []).forEach(a => {
+      if (a.phone) {
+        custPhones.add(String(a.phone).trim());
+        custPhones.add(String(a.phone).replace(/\D/g, "").slice(-10));
+      }
+    });
+
+    const custEmail = cust.email ? String(cust.email).trim().toLowerCase() : "";
+
+    const matchesPhone = custPhones.has(orderPhoneRaw) || (orderPhoneClean.length === 10 && custPhones.has(orderPhoneClean));
+    const matchesEmail = orderEmail && custEmail && orderEmail === custEmail;
+
+    if (!matchesPhone && !matchesEmail) {
       return res.status(403).json({ error: "forbidden" });
     }
 
@@ -1099,10 +1117,40 @@ router.get("/my-orders", async (req, res) => {
 });
 
 router.get("/my", auth, requireRole("customer"), async (req, res) => {
-  const cust = await Customer.findById(req.user.id).select("phone email");
-  if (!cust) return res.status(404).json({ error: "not_found" });
-  const items = await Order.find({ "customer.phone": cust.phone }).sort({ createdAt: -1 });
-  res.json(items);
+  try {
+    const cust = await Customer.findById(req.user.id).select("phone email savedAddresses");
+    if (!cust) return res.status(404).json({ error: "not_found" });
+
+    const phones = new Set();
+    if (cust.phone) {
+      phones.add(String(cust.phone).trim());
+      const cleaned = String(cust.phone).replace(/\D/g, "").slice(-10);
+      if (cleaned.length === 10) phones.add(cleaned);
+    }
+    (cust.savedAddresses || []).forEach(a => {
+      if (a.phone) {
+        phones.add(String(a.phone).trim());
+        const cleaned = String(a.phone).replace(/\D/g, "").slice(-10);
+        if (cleaned.length === 10) phones.add(cleaned);
+      }
+    });
+
+    const phoneList = Array.from(phones);
+    const email = cust.email ? String(cust.email).trim().toLowerCase() : "";
+
+    const orClauses = [
+      { "customer.phone": { $in: phoneList } }
+    ];
+    if (email) {
+      orClauses.push({ "customer.email": email });
+    }
+
+    const items = await Order.find({ $or: orClauses }).sort({ createdAt: -1 });
+    res.json(items);
+  } catch (err) {
+    console.error("Failed to fetch customer orders list:", err);
+    res.status(500).json({ error: "failed_to_fetch_orders" });
+  }
 });
 
 
@@ -1249,14 +1297,35 @@ router.post("/:id/cancel-customer", auth, requireRole("customer"), async (req, r
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
   
   try {
-    const cust = await Customer.findById(req.user.id).select("phone");
+    const cust = await Customer.findById(req.user.id).select("phone email savedAddresses");
     if (!cust) return res.status(404).json({ error: "customer_not_found" });
 
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ error: "order_not_found" });
 
     // Ensure the order belongs to this customer
-    if (order.customer.phone !== cust.phone) {
+    const orderPhoneClean = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
+    const orderPhoneRaw = String(order.customer.phone || "").trim();
+    const orderEmail = String(order.customer.email || "").trim().toLowerCase();
+
+    const custPhones = new Set();
+    if (cust.phone) {
+      custPhones.add(String(cust.phone).trim());
+      custPhones.add(String(cust.phone).replace(/\D/g, "").slice(-10));
+    }
+    (cust.savedAddresses || []).forEach(a => {
+      if (a.phone) {
+        custPhones.add(String(a.phone).trim());
+        custPhones.add(String(a.phone).replace(/\D/g, "").slice(-10));
+      }
+    });
+
+    const custEmail = cust.email ? String(cust.email).trim().toLowerCase() : "";
+
+    const matchesPhone = custPhones.has(orderPhoneRaw) || (orderPhoneClean.length === 10 && custPhones.has(orderPhoneClean));
+    const matchesEmail = orderEmail && custEmail && orderEmail === custEmail;
+
+    if (!matchesPhone && !matchesEmail) {
       return res.status(403).json({ error: "forbidden" });
     }
 
