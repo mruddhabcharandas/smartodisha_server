@@ -583,7 +583,7 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
       
       const dest = deliveryAddress?.pincode || (cust.savedAddresses || []).find(a => a.isDefault)?.pincode || cust.kyc?.pincode;
       const weight = totalWeightGrams > 0 ? totalWeightGrams / 1000 : 0.5;
-      const orderAmount = payableProductTotal;
+      const orderAmount = totals.total; // Use original product total before coupon (matches shippingRoutes.js)
       const paymentMethodForShipping = paymentMethod === "CASHFREE" ? "prepaid" : "cod";
       
       let baseAmt = 85;
@@ -653,10 +653,10 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
     } catch (e) {
       console.error("Shipping calculation failed, using default:", e.message);
       const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
-      const isPrepaidFree = payableProductTotal >= freeDeliveryAbove && paymentMethod === 'CASHFREE';
+      const isPrepaidFree = totals.total >= freeDeliveryAbove && paymentMethod === 'CASHFREE';
       shippingCost = isPrepaidFree ? 0 : 85;
       if (paymentMethod === "COD") {
-        codCharge = Math.min(Math.max(Math.round(payableProductTotal * 0.05), 40), 100);
+        codCharge = Math.min(Math.max(Math.round(totals.total * 0.05), 40), 100);
       }
     }
 
