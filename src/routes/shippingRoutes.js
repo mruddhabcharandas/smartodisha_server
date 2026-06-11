@@ -3,8 +3,9 @@ import mongoose from "mongoose";
 import Order from "../models/Order.js";
 import Store from "../models/Store.js";
 import Product from "../models/Product.js";
+import Customer from "../models/Customer.js";
 import { auth, requireRole, requirePermission } from "../middleware/auth.js";
-import shiprocket, { checkServiceability } from "../lib/shiprocket.js";
+import shiprocket, { checkServiceability, createShiprocketClient } from "../lib/shiprocket.js";
 import PDFDocument from "pdfkit";
 import axios from "axios";
 
@@ -441,7 +442,7 @@ router.post("/shiprocket/create", auth, requirePermission("orders"), async (req,
     order.shiprocketAwbNumber = waybill;
     order.shipment_status = status;
     order.shippingAddress = addr;
-    order.status = "SHIPPED";
+    order.status = "PACKED";
     await order.save();
 
     res.json({ waybill, trackingUrl, status });
@@ -485,6 +486,52 @@ router.get("/shiprocket/label/:awb", auth, requirePermission("orders"), async (r
     doc.fontSize(12).text(`Amount: ₹${Number(order.totalEstimate || 0).toLocaleString("en-IN")}`);
   }
   doc.end();
+});
+
+// Get tracking info for order
+router.get("/track/:orderId", auth, requireRole(["admin", "seller", "customer"]), async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.orderId);
+    if (!order) {
+      return res.status(404).json({ error: "order_not_found" });
+    }
+    // Check access
+    if (req.user.role === "seller") {
+      const store = await Store.findOne({ user: req.user.id });
+      if (!store || order.store.toString() !== store._id.toString()) {
+        return res.status(403).json({ error: "forbidden" });
+      }
+    } else if (req.user.role === "customer") {
+      const customer = await Customer.findOne({ user: req.user.id });
+      if (!customer || order.customer.phone !== customer.phone) {
+        return res.status(403).json({ error: "forbidden" });
+      }
+    }
+    if (!order.shiprocketAwbNumber) {
+      return res.json({ tracking: null, order });
+    }
+    // Get Shiprocket credentials
+    const products = await Product.find({ _id: { $in: order.items.map(i => i.product) } });
+    const storeId = products[0]?.store;
+    let srEmail = process.env.SHIPROCKET_EMAIL;
+    let srPassword = process.env.SHIPROCKET_PASSWORD;
+    if (storeId) {
+      const storeObj = await Store.findById(storeId).select("shiprocketEmail shiprocketPassword");
+      if (storeObj?.shiprocketEmail && storeObj?.shiprocketPassword) {
+        srEmail = storeObj.shiprocketEmail;
+        srPassword = storeObj.shiprocketPassword;
+      }
+    }
+    if (!srEmail || !srPassword) {
+      return res.json({ tracking: null, order });
+    }
+    const client = createShiprocketClient({ email: srEmail, password: srPassword });
+    const { data } = await client.get(`/courier/track/awb/${order.shiprocketAwbNumber}`);
+    res.json({ tracking: data, order });
+  } catch (e) {
+    console.error("Track error:", e.response?.data || e.message);
+    res.status(500).json({ error: "track_failed" });
+  }
 });
 
 export default router;

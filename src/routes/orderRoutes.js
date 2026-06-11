@@ -1579,4 +1579,91 @@ router.post("/:id/delhivery/standard-shipment", auth, requirePermission("orders"
   }
 });
 
+// Repay for failed payments
+router.post("/:id/repay", auth, requireRole("customer"), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const order = await Order.findById(id);
+    if (!order) {
+      return res.status(404).json({ error: "order_not_found" });
+    }
+    if (order.paymentStatus !== "FAILED" && order.paymentStatus !== "PENDING") {
+      return res.status(400).json({ error: "cannot_repay" });
+    }
+    // Check if customer owns the order
+    const customer = await Customer.findOne({ user: req.user.id });
+    if (!customer || order.customer.phone !== customer.phone) {
+      return res.status(403).json({ error: "forbidden" });
+    }
+    // Re-initiate payment (similar to prepare-payment)
+    const paymentPayload = {
+      order_id: order._id.toString(),
+      order_amount: order.totalEstimate,
+      order_currency: "INR",
+      customer_details: {
+        customer_id: customer._id.toString(),
+        customer_name: order.customer.name,
+        customer_email: order.customer.email || "customer@example.com",
+        customer_phone: order.customer.phone
+      },
+      order_meta: {
+        return_url: `${process.env.FRONTEND_URL}/orders/${order._id}`,
+        notify_url: `${process.env.BACKEND_URL}/api/orders/webhook`
+      }
+    };
+    const { data } = await authCashfree().post("/pg/orders", paymentPayload);
+    order.cashfreeOrderId = data.order_id;
+    order.paymentStatus = "PENDING";
+    order.status = "PENDING_PAYMENT";
+    await order.save();
+    await AuditLog.create({
+      actorId: req.user.id,
+      actorRole: "customer",
+      type: "ORDER_PAYMENT_RETRY",
+      entityType: "ORDER",
+      entityId: order._id.toString(),
+      note: "Retried payment"
+    });
+    res.json({ success: true, payment_session_id: data.payment_session_id, order_id: data.order_id });
+  } catch (err) {
+    res.status(500).json({ error: "repay_failed", message: err.message });
+  }
+});
+
+// Update order status
+router.put("/:id/status", auth, requireRole(["admin", "seller"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    const validStatuses = ["PENDING", "PENDING_PAYMENT", "CONFIRMED", "PROCESSING", "PACKED", "SHIPPED", "OUT_FOR_DELIVERY", "DELIVERED", "CANCELLED", "RETURNED"];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ error: "invalid_status" });
+    }
+    const order = await Order.findById(id);
+    if (!order) {
+      return res.status(404).json({ error: "order_not_found" });
+    }
+    // If seller, check if order belongs to their store
+    if (req.user.role === "seller") {
+      const store = await Store.findOne({ user: req.user.id });
+      if (!store || order.store.toString() !== store._id.toString()) {
+        return res.status(403).json({ error: "forbidden" });
+      }
+    }
+    order.status = status;
+    await order.save();
+    await AuditLog.create({
+      actorId: req.user.id,
+      actorRole: req.user.role,
+      type: "ORDER_STATUS",
+      entityType: "ORDER",
+      entityId: order._id.toString(),
+      note: `Order status changed to ${status}`
+    });
+    res.json({ success: true, order });
+  } catch (err) {
+    res.status(500).json({ error: "update_failed" });
+  }
+});
+
 export default router;

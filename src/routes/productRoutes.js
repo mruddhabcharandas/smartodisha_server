@@ -302,7 +302,7 @@ router.get("/:idOrSlug", async (req, res) => {
   await item.populate("brand", "name");
   await item.populate("category", "name");
   await item.populate("subCategory", "name");
-  await item.populate("store", "name address phone pincode city pickupAddress pickupName pickupPhone storePercentage adminCutPercentage");
+  await item.populate("store", "name address phone pincode city pickupAddress pickupName pickupPhone storePercentage adminCutPercentage image isVerified");
   
   if (!item.isActive) return res.status(404).json({ error: "not_found" });
   const canViewPrice = isViewerAuthorized(req);

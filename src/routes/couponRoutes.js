@@ -7,6 +7,25 @@ const router = express.Router();
 
 const toUpper = (s) => (s || "").toString().trim().toUpperCase();
 
+// Public route to get available coupons (for checkout)
+router.get("/available", async (req, res) => {
+  try {
+    const now = new Date();
+    const coupons = await Coupon.find({
+      isActive: true,
+      expiryDate: { $gte: now },
+      $or: [
+        { usageLimit: 0 },
+        { usageLimit: { $exists: false } },
+        { $expr: { $lt: ["$usedCount", "$usageLimit"] } }
+      ]
+    }).sort({ createdAt: -1 });
+    res.json(coupons);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch coupons" });
+  }
+});
+
 router.post("/", auth, requireRole("admin"), async (req, res) => {
   const code = toUpper(req.body?.code);
   const { type, value, minAmount, minOrderValue, maxDiscount, expiryDate, usageLimit, partnerId, partnerName, partnerEmail, partnerPhone, partnerCommissionPercent, maxTotalSales, isActive, password } = req.body || {};
