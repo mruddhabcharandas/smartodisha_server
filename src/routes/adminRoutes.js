@@ -51,7 +51,8 @@ router.post("/stores", auth, requireRole("admin"), async (req, res) => {
       image,
       storePercentage,
       adminCutPercentage,
-      isActive
+      isActive,
+      isPopular
     } = req.body;
 
     // Validate required fields
@@ -75,7 +76,8 @@ router.post("/stores", auth, requireRole("admin"), async (req, res) => {
       image,
       storePercentage,
       adminCutPercentage,
-      isActive
+      isActive,
+      isPopular
     });
 
     // Send email to store owner
@@ -127,7 +129,8 @@ router.put("/stores/:id", auth, requireRole("admin"), async (req, res) => {
       image,
       storePercentage,
       adminCutPercentage,
-      isActive
+      isActive,
+      isPopular
     } = req.body;
 
     if (name) store.name = name;
@@ -140,6 +143,7 @@ router.put("/stores/:id", auth, requireRole("admin"), async (req, res) => {
     if (storePercentage !== undefined) store.storePercentage = storePercentage;
     if (adminCutPercentage !== undefined) store.adminCutPercentage = adminCutPercentage;
     if (isActive !== undefined) store.isActive = isActive;
+    if (isPopular !== undefined) store.isPopular = isPopular;
 
     await store.save();
 

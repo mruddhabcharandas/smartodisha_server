@@ -93,7 +93,7 @@ router.get("/categories", async (req, res) => {
 
 router.get("/stores", async (req, res) => {
   const items = await getOrSetCache("stores:all", async () => {
-    return await Store.find({ isActive: true }).sort({ name: 1 });
+    return await Store.find({ isActive: true, isPopular: true }).sort({ name: 1 });
   }, 86400); // 24 hours
   res.json(items);
 });

@@ -26,6 +26,7 @@ const storeSchema = new mongoose.Schema(
     adminCutPercentage: { type: Number, default: 5, min: 0 }, // Admin's percentage cut
     isActive: { type: Boolean, default: true },
     isVerified: { type: Boolean, default: true },
+    isPopular: { type: Boolean, default: false },
     resetPasswordToken: { type: String },
     resetPasswordExpires: { type: Date },
     // Shiprocket & Pickup Details
