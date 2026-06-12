@@ -461,19 +461,20 @@ router.get("/shiprocket/label/:awb", auth, requireRole(["admin", "seller"]), asy
     console.log("Shiprocket label response:", JSON.stringify(labelResponse.data, null, 2));
 
     // If we get a PDF URL, stream it directly!
-    if (labelResponse.data?.label_url) {
+    const labelData = labelResponse.data?.data || labelResponse.data;
+    if (labelData?.label_url) {
       // Fetch the PDF from Shiprocket's URL
       const axios = await import("axios");
-      const pdfResponse = await axios.default.get(labelResponse.data.label_url, {
+      const pdfResponse = await axios.default.get(labelData.label_url, {
         responseType: "arraybuffer"
       });
 
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
       return res.send(Buffer.from(pdfResponse.data));
-    } else if (labelResponse.data?.pdf_data) {
+    } else if (labelData?.pdf_data) {
       // Stream directly if available as base64
-      const pdfBuffer = Buffer.from(labelResponse.data.pdf_data, 'base64');
+      const pdfBuffer = Buffer.from(labelData.pdf_data, 'base64');
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
       return res.send(pdfBuffer);
@@ -482,9 +483,11 @@ router.get("/shiprocket/label/:awb", auth, requireRole(["admin", "seller"]), asy
       const invoiceResponse = await client.post("/orders/print/invoice", {
         ids: [order.shiprocketOrderId || order._id]
       });
-      if (invoiceResponse.data?.invoice_url) {
+      const invoiceData = invoiceResponse.data?.data || invoiceResponse.data;
+      if (invoiceData?.invoice_url || invoiceData?.label_url) {
         const axios = await import("axios");
-        const pdfResponse = await axios.default.get(invoiceResponse.data.invoice_url, {
+        const pdfUrl = invoiceData.invoice_url || invoiceData.label_url;
+        const pdfResponse = await axios.default.get(pdfUrl, {
           responseType: "arraybuffer"
         });
         res.setHeader("Content-Type", "application/pdf");

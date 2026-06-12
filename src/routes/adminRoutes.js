@@ -6,7 +6,7 @@ import Customer from "../models/Customer.js";
 import Bill from "../models/Bill.js";
 import Store from "../models/Store.js";
 import { sendEmail } from "../lib/mailer.js";
-import { bumpCacheVersion } from "../lib/redis.js";
+import { bumpCacheVersion, delCache } from "../lib/redis.js";
 
 import Admin from "../models/Admin.js";
 
@@ -92,6 +92,7 @@ router.post("/stores", auth, requireRole("admin"), async (req, res) => {
 
     // Invalidate store cache
     await bumpCacheVersion("stores");
+    await delCache("stores:all:*");
 
     const storeObj = store.toObject();
     delete storeObj.password;
@@ -142,6 +143,7 @@ router.put("/stores/:id", auth, requireRole("admin"), async (req, res) => {
 
     // Invalidate store cache
     await bumpCacheVersion("stores");
+    await delCache("stores:all:*");
 
     const storeObj = store.toObject();
     delete storeObj.password;
@@ -162,6 +164,7 @@ router.delete("/stores/:id", auth, requireRole("admin"), async (req, res) => {
 
     // Invalidate store cache
     await bumpCacheVersion("stores");
+    await delCache("stores:all:*");
 
     res.json({ deleted: true });
   } catch (err) {
