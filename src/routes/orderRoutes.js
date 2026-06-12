@@ -115,11 +115,34 @@ const tryCreateShiprocketShipment = async (order) => {
     }
 
     let totalWeightGrams = 0;
+    let totalLengthCm = 0;
+    let totalWidthCm = 0;
+    let totalHeightCm = 0;
+
     const orderItems = (order.items || []).map(it => {
       const p = products.find(prod => prod._id.toString() === it.product.toString());
-      if (p && p.weight) {
-        totalWeightGrams += (p.weight * it.quantity);
+      
+      // Get product dimensions (use variant dimensions if applicable, else product dimensions)
+      let productWeight = p?.weight || 0;
+      let productLength = p?.length || 10;
+      let productWidth = p?.width || 10;
+      let productHeight = p?.height || 10;
+
+      if (it.variantId && p?.variants) {
+        const variant = p.variants.find(v => v._id.toString() === it.variantId.toString());
+        if (variant) {
+          productWeight = variant.weight || productWeight;
+          productLength = variant.length || productLength;
+          productWidth = variant.width || productWidth;
+          productHeight = variant.height || productHeight;
+        }
       }
+
+      totalWeightGrams += (productWeight * it.quantity);
+      totalLengthCm += (productLength * it.quantity);
+      totalWidthCm += (productWidth * it.quantity);
+      totalHeightCm += (productHeight * it.quantity);
+
       return {
         name: it.name,
         sku: it.variantSku || p?.sku || it.product.toString(),
@@ -131,7 +154,16 @@ const tryCreateShiprocketShipment = async (order) => {
       };
     });
 
-    const weightKg = totalWeightGrams > 0 ? (totalWeightGrams / 1000) : 0.5;
+    // Calculate actual vs volumetric weight
+    const actualWeightKg = totalWeightGrams > 0 ? (totalWeightGrams / 1000) : 0.5;
+    // Volumetric weight formula: (length × width × height) / 5000 for kg
+    const volumetricWeightKg = (totalLengthCm * totalWidthCm * totalHeightCm) / 5000;
+    // Use whichever is larger between actual and volumetric weight
+    const weightKg = Math.max(actualWeightKg, volumetricWeightKg, 0.5);
+    // Use average dimensions (or sum)
+    const length = totalLengthCm || 10;
+    const breadth = totalWidthCm || 10;
+    const height = totalHeightCm || 10;
     const cleanPhone = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
 
     const client = createShiprocketClient({ email: srEmail, password: srPassword });
@@ -175,9 +207,9 @@ const tryCreateShiprocketShipment = async (order) => {
       transaction_charges: 0,
       total_discount: Number(order.couponDiscount || 0),
       sub_total: Number(order.totalEstimate || 0),
-      length: 10,
-      breadth: 10,
-      height: 10,
+      length: length,
+      breadth: breadth,
+      height: height,
       weight: weightKg
     };
 
@@ -281,25 +313,71 @@ export const confirmAndFinalizeOrder = async (order, cashfreePaymentId, cashfree
     console.error("Billing creation failed on finalize:", err);
   }
 
-  // Send Email
+  // Send Emails
   try {
-    const to = order.customer.email || process.env.MAIL_TO || process.env.COMPANY_EMAIL || process.env.MAIL_FROM;
-    const html = renderMail({
-      heading: order.paymentMethod === "COD" ? "Order Confirmed (COD)" : "Payment Confirmed",
-      subheading: order.paymentMethod === "COD" 
-        ? "Your COD order has been confirmed. 15% advance received." 
-        : "We’ve confirmed your payment and are preparing your shipment.",
+    const customerEmail = order.customer.email || process.env.MAIL_TO || process.env.COMPANY_EMAIL;
+    const adminEmail = process.env.ADMIN_EMAIL || process.env.COMPANY_EMAIL;
+    
+    // 1. Notify Customer
+    const customerHtml = renderMail({
+      heading: order.paymentMethod === "COD" ? "Order Confirmed" : "Payment Confirmed",
+      subheading: `Hi ${order.customer.name}, your order ${order.orderNumber} has been successfully placed.`,
       highlight: `Order ID: ${order.orderNumber}`,
       blocks: [
         { label: "Payment Method", value: order.paymentMethod },
-        { label: "Amount Paid", value: `₹${Number(order.paymentMethod === "COD" ? Math.ceil(order.totalEstimate * 0.15) : order.totalEstimate).toLocaleString("en-IN")}` },
-        ...(order.paymentMethod === "COD" ? [{ label: "COD Due Amount", value: `₹${Number(order.codDueAmount).toLocaleString("en-IN")}` }] : []),
-        { label: "Current Status", value: order.status }
-      ]
+        { label: "Grand Total", value: `₹${Number(order.totalEstimate).toLocaleString("en-IN")}` },
+        { label: "Status", value: order.status }
+      ],
+      items: order.items,
+      totals: {
+        subtotal: order.productTotal + order.couponDiscount,
+        discount: order.couponDiscount,
+        gstTotal: order.items.reduce((sum, it) => sum + (it.gst || 0), 0),
+        total: order.totalEstimate
+      }
     });
-    if (to) await sendEmail({ to, subject: `Order confirmed - ${process.env.COMPANY_NAME || "SmartOdisha"}`, html });
+    if (customerEmail) {
+      await sendEmail({ to: customerEmail, subject: `Order Confirmed - ${order.orderNumber}`, html: customerHtml });
+    }
+
+    // 2. Notify Seller (Store)
+    if (order.store) {
+      const storeObj = await Store.findById(order.store);
+      if (storeObj && storeObj.email) {
+        const sellerHtml = renderMail({
+          heading: "New Order Received!",
+          subheading: `You have received a new order ${order.orderNumber} from ${order.customer.name}.`,
+          highlight: `Order ID: ${order.orderNumber}`,
+          blocks: [
+            { label: "Customer Name", value: order.customer.name },
+            { label: "Customer Phone", value: order.customer.phone },
+            { label: "Store Revenue", value: `₹${Number(order.storeRevenue).toLocaleString("en-IN")}` },
+            { label: "Payment", value: order.paymentMethod }
+          ],
+          items: order.items
+        });
+        await sendEmail({ to: storeObj.email, subject: `New Order Received - ${order.orderNumber}`, html: sellerHtml });
+      }
+    }
+
+    // 3. Notify Admin
+    if (adminEmail) {
+      const adminHtml = renderMail({
+        heading: "New System Order",
+        subheading: `A new order ${order.orderNumber} has been placed in the system.`,
+        highlight: `Revenue: ₹${Number(order.adminRevenue).toLocaleString("en-IN")}`,
+        blocks: [
+          { label: "Order Number", value: order.orderNumber },
+          { label: "Total Sale", value: `₹${Number(order.totalEstimate).toLocaleString("en-IN")}` },
+          { label: "Admin Cut", value: `₹${Number(order.adminRevenue).toLocaleString("en-IN")}` },
+          { label: "Customer", value: `${order.customer.name} (${order.customer.phone})` }
+        ]
+      });
+      await sendEmail({ to: adminEmail, subject: `System Order Alert - ${order.orderNumber}`, html: adminHtml });
+    }
+
   } catch (err) {
-    console.error("Email send failed on finalize:", err);
+    console.error("Email notifications failed on finalize:", err);
   }
 
   // Shiprocket auto creation

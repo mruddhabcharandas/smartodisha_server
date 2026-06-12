@@ -80,21 +80,10 @@ router.post("/stores", auth, requireRole("admin"), async (req, res) => {
       isPopular
     });
 
-    // Send email to store owner
+    // Send greeting email to store owner
+    const { sendSellerGreeting } = await import("../lib/mailer.js");
     try {
-      await sendEmail({
-        to: store.email,
-        subject: `Welcome to ${process.env.COMPANY_NAME || "SmartOdisha"}!`,
-        html: `
-          <div style="font-family: ui-sans-serif, system-ui; max-width: 560px; margin: auto; padding: 24px; border: 1px solid #eee; border-radius: 12px;">
-            <h2 style="color:#111827;margin:0 0 12px;font-weight:800">Welcome, ${store.name}!</h2>
-            <p style="color:#374151;line-height:1.6">Your store account has been created. You can now sign in to manage your products and view orders.</p>
-            <p style="color:#6b7280;margin-top:16px;font-size:14px">Email: ${store.email}<br>Password: ${password}</p>
-            <a href="${process.env.CLIENT_URL || "http://localhost:5173"}/business/login" style="display:inline-block;margin-top:16px;padding:12px 16px;background:#2563eb;color:#fff;text-decoration:none;border-radius:10px;font-weight:700">Login Now</a>
-            <p style="color:#6b7280;margin-top:24px;font-size:12px">&copy; ${new Date().getFullYear()} ${process.env.COMPANY_NAME || "SmartOdisha"}</p>
-          </div>
-        `
-      });
+      await sendSellerGreeting(store.email, store.name);
     } catch (err) {
       console.error("Failed to send welcome email to store:", err);
     }
@@ -386,23 +375,23 @@ router.post("/customers/:id/approve", auth, requirePermission("customers"), asyn
   if (!updated) return res.status(404).json({ error: "not_found" });
   if (updated.email) {
     try {
-      const base =
-        (process.env.CLIENT_URL && process.env.CLIENT_URL.replace(/\/$/, "")) ||
-        (req.headers.origin && String(req.headers.origin).replace(/\/$/, "")) ||
-        "https://click2kart.net";
+      const loginUrl = `${process.env.FRONTEND_URL || "http://localhost:5173"}/login`;
       await sendEmail({
         to: updated.email,
-        subject: `Welcome to ${process.env.COMPANY_NAME || "Click2Kart"}`,
-        html: `
-          <div style="font-family: ui-sans-serif, system-ui; max-width: 560px; margin: auto; padding: 24px; border: 1px solid #eee; border-radius: 12px;">
-            <h2 style="color:#111827;margin:0 0 12px;font-weight:800">Welcome, ${updated.name}!</h2>
-            <p style="color:#374151;line-height:1.6">Your B2B account has been approved. You can now sign in to view wholesale prices and place orders.</p>
-            <a href="${base}/login" style="display:inline-block;margin-top:16px;padding:12px 16px;background:#2563eb;color:#fff;text-decoration:none;border-radius:10px;font-weight:700">Login Now</a>
-            <p style="color:#6b7280;margin-top:24px;font-size:12px">&copy; ${new Date().getFullYear()} ${process.env.COMPANY_NAME || "Click2Kart"}</p>
-          </div>
-        `
+        subject: `Account Approved - ${process.env.COMPANY_NAME || "SmartOdisha"}`,
+        html: renderMail({
+          heading: "Account Approved!",
+          subheading: `Hi ${updated.name}, your account has been approved. You can now log in and start shopping.`,
+          blocks: [
+            { label: "Account Status", value: "Active" },
+            { label: "Email", value: updated.email }
+          ],
+          highlight: `<a href="${loginUrl}" style="color:inherit;text-decoration:none">Click here to Login</a>`
+        })
       });
-    } catch {}
+    } catch (err) {
+      console.error("Failed to send customer approval email:", err);
+    }
   }
   res.json({ approved: true, customer: updated });
 });

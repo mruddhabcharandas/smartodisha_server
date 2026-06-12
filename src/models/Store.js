@@ -20,6 +20,7 @@ const storeSchema = new mongoose.Schema(
       pincode: { type: String, default: "" }
     },
     gstNumber: { type: String, default: "" },
+    gstPercentage: { type: Number, default: 18, min: 0, max: 100 },
     image: { type: imageSchema, default: null },
     sellerAvatar: { type: imageSchema, default: null },
     storePercentage: { type: Number, default: 0, min: 0 }, // Store's markup percentage

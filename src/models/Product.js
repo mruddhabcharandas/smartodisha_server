@@ -22,6 +22,9 @@ const productSchema = new mongoose.Schema(
     images: { type: [imageSchema], default: [] },
     stock: { type: Number, required: true, min: 0 },
     weight: { type: Number, default: 0, min: 0 }, // weight in grams
+    length: { type: Number, default: 0, min: 0 }, // length in cm
+    width: { type: Number, default: 0, min: 0 }, // width in cm
+    height: { type: Number, default: 0, min: 0 }, // height in cm
     gst: { type: Number, default: 0, min: 0 },
     mrp: { type: Number, min: 0 },
     highlights: { type: [String], default: [] },
@@ -46,6 +49,9 @@ const productSchema = new mongoose.Schema(
           stock: { type: Number, min: 0, default: 0 },
           sku: { type: String },
           weight: { type: Number, default: 0 }, // Weight in grams for variant
+          length: { type: Number, default: 0 }, // Length in cm for variant
+          width: { type: Number, default: 0 }, // Width in cm for variant
+          height: { type: Number, default: 0 }, // Height in cm for variant
           isActive: { type: Boolean, default: true },
           images: { type: [imageSchema], default: [] }
         }

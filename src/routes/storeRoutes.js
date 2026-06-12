@@ -82,15 +82,9 @@ router.post("/forgot-password", async (req, res) => {
     const resetUrl = `${process.env.FRONTEND_URL || "http://localhost:5173"}/business/reset-password?token=${resetToken}`;
 
     // Send email
+    const { sendPasswordResetEmail } = await import("../lib/mailer.js");
     try {
-      await sendEmail({
-        to: store.email,
-        subject: "Password Reset Request - SmartOdisha Business",
-        html: `<p>Hi ${store.name},</p>
-               <p>You requested a password reset. Click the link below to reset your password:</p>
-               <a href="${resetUrl}">${resetUrl}</a>
-               <p>This link will expire in 1 hour.</p>`
-      });
+      await sendPasswordResetEmail(store.email, store.name, resetUrl);
     } catch (emailErr) {
       console.error("Email send failed:", emailErr);
     }
@@ -202,6 +196,35 @@ router.get("/profile", protect, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch profile" });
+  }
+});
+
+// Change password
+router.post("/change-password", protect, async (req, res) => {
+  try {
+    const { oldPassword, newPassword } = req.body;
+    if (!oldPassword || !newPassword) {
+      return res.status(400).json({ error: "Both old and new passwords are required" });
+    }
+
+    const store = await Store.findById(req.store._id);
+    if (!store) {
+      return res.status(404).json({ error: "Store not found" });
+    }
+
+    // Verify old password
+    const isMatch = await store.comparePassword(oldPassword);
+    if (!isMatch) {
+      return res.status(401).json({ error: "Old password is incorrect" });
+    }
+
+    // Update password
+    store.password = newPassword;
+    await store.save();
+    res.json({ message: "Password changed successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to change password" });
   }
 });
 
