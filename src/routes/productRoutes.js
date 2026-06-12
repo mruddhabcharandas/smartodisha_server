@@ -382,7 +382,7 @@ router.get("/recommend", async (req, res) => {
 });
 
 router.post("/", auth, requirePermission("products"), async (req, res) => {
-  const { name, price, categoryId, subCategoryId, images, stock, weight, gst, description, highlights, specifications, bulkDiscountQuantity, bulkDiscountPriceReduction, mrp, bulkTiers, variants, brandId, minOrderQty, store, section, hsnCode, sku, packSize } = req.body || {};
+  const { name, price, categoryId, subCategoryId, images, stock, weight, gst, description, highlights, specifications, bulkDiscountQuantity, bulkDiscountPriceReduction, mrp, bulkTiers, variants, brandId, minOrderQty, store, section, hsnCode, sku, packSize, length, width, height } = req.body || {};
   if (!name || price == null || stock == null || !categoryId) return res.status(400).json({ error: "missing_fields" });
   
   if (brandId && !mongoose.isValidObjectId(brandId)) return res.status(400).json({ error: "invalid_brand" });
@@ -404,6 +404,9 @@ router.post("/", auth, requirePermission("products"), async (req, res) => {
     images: imgArr,
     stock: Number(stock),
     weight: Number(weight || 0),
+    length: Number(length || 0),
+    width: Number(width || 0),
+    height: Number(height || 0),
     gst: gst == null ? 0 : Number(gst),
     mrp: mrp == null || mrp === "" ? undefined : Number(mrp),
     priceTrend: 0, 
@@ -437,6 +440,9 @@ router.post("/", auth, requirePermission("products"), async (req, res) => {
         stock: Number(v?.stock ?? 0),
         sku: v?.sku ? String(v.sku).trim() : "",
         weight: Number(v?.weight ?? weight ?? 0),
+        length: Number(v?.length ?? length ?? 0),
+        width: Number(v?.width ?? width ?? 0),
+        height: Number(v?.height ?? height ?? 0),
         isActive: v?.isActive != null ? !!v.isActive : true,
         images: Array.isArray(v?.images) ? v.images.map(i => (typeof i === "string" ? { url: i } : i)).filter(i => i && i.url) : []
       };
@@ -458,7 +464,7 @@ router.post("/", auth, requirePermission("products"), async (req, res) => {
 
 router.put("/:id", auth, requirePermission("products"), async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
-  const allowed = ["name", "description", "highlights", "specifications", "price", "categoryId", "subCategoryId", "images", "stock", "weight", "gst", "mrp", "isActive", "bulkDiscountQuantity", "bulkDiscountPriceReduction", "bulkTiers", "variants", "brandId", "minOrderQty", "store", "section", "hsnCode", "sku", "packSize"];
+  const allowed = ["name", "description", "highlights", "specifications", "price", "categoryId", "subCategoryId", "images", "stock", "weight", "length", "width", "height", "gst", "mrp", "isActive", "bulkDiscountQuantity", "bulkDiscountPriceReduction", "bulkTiers", "variants", "brandId", "minOrderQty", "store", "section", "hsnCode", "sku", "packSize"];
   const payload = {};
   for (const k of allowed) if (k in req.body) payload[k] = req.body[k];
   if (payload.packSize !== undefined) payload.packSize = Number(payload.packSize || 1);
@@ -523,6 +529,9 @@ router.put("/:id", auth, requirePermission("products"), async (req, res) => {
         stock: v.stock != null ? Number(v.stock) : existingStock,
         sku: v?.sku ? String(v.sku).trim() : "",
         weight: Number(v?.weight ?? 0),
+        length: Number(v?.length ?? 0),
+        width: Number(v?.width ?? 0),
+        height: Number(v?.height ?? 0),
         isActive: v?.isActive != null ? !!v.isActive : true,
         images: Array.isArray(v?.images) ? v.images.map(i => (typeof i === "string" ? { url: i } : i)).filter(i => i && i.url) : []
       };
@@ -623,6 +632,9 @@ router.post("/:id/variants", auth, requirePermission("products"), async (req, re
     stock: Number(v?.stock ?? 0),
     sku,
     weight: Number(v?.weight ?? p.weight ?? 0),
+    length: Number(v?.length ?? p.length ?? 0),
+    width: Number(v?.width ?? p.width ?? 0),
+    height: Number(v?.height ?? p.height ?? 0),
     isActive: v?.isActive != null ? !!v.isActive : true,
     images: Array.isArray(v?.images) ? v.images.map(i => (typeof i === "string" ? { url: i } : i)).filter(i => i && i.url) : []
   };
@@ -683,6 +695,9 @@ router.put("/:id/variants/:vid", auth, requirePermission("products"), async (req
     v.attributes = attrs;
   }
   if (payload.weight != null) v.weight = Number(payload.weight);
+  if (payload.length != null) v.length = Number(payload.length);
+  if (payload.width != null) v.width = Number(payload.width);
+  if (payload.height != null) v.height = Number(payload.height);
   if (payload.price != null) v.price = Number(payload.price);
   if (payload.mrp != null) v.mrp = Number(payload.mrp);
   if (payload.stock != null) {

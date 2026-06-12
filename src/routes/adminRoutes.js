@@ -48,6 +48,7 @@ router.post("/stores", auth, requireRole("admin"), async (req, res) => {
       phone,
       address,
       gstNumber,
+      gstPercentage,
       image,
       storePercentage,
       adminCutPercentage,
@@ -73,6 +74,7 @@ router.post("/stores", auth, requireRole("admin"), async (req, res) => {
       phone,
       address,
       gstNumber,
+      gstPercentage,
       image,
       storePercentage,
       adminCutPercentage,
@@ -115,6 +117,7 @@ router.put("/stores/:id", auth, requireRole("admin"), async (req, res) => {
       phone,
       address,
       gstNumber,
+      gstPercentage,
       image,
       storePercentage,
       adminCutPercentage,
@@ -128,6 +131,7 @@ router.put("/stores/:id", auth, requireRole("admin"), async (req, res) => {
     if (phone) store.phone = phone;
     if (address) store.address = address;
     if (gstNumber !== undefined) store.gstNumber = gstNumber;
+    if (gstPercentage !== undefined) store.gstPercentage = gstPercentage;
     if (image !== undefined) store.image = image;
     if (storePercentage !== undefined) store.storePercentage = storePercentage;
     if (adminCutPercentage !== undefined) store.adminCutPercentage = adminCutPercentage;
