@@ -562,11 +562,34 @@ router.post("/orders/:id/shiprocket/create", protect, async (req, res) => {
     const products = await Product.find({ _id: { $in: productIds } });
 
     let totalWeightGrams = 0;
+    let totalLengthCm = 0;
+    let totalWidthCm = 0;
+    let totalHeightCm = 0;
+
     const orderItems = (order.items || []).map(it => {
       const p = products.find(prod => prod._id.toString() === it.product.toString());
-      if (p && p.weight) {
-        totalWeightGrams += (p.weight * it.quantity);
+
+      // Get product dimensions (use variant dimensions if applicable, else product dimensions)
+      let productWeight = p?.weight || 0;
+      let productLength = p?.length || 10;
+      let productWidth = p?.width || 10;
+      let productHeight = p?.height || 10;
+
+      if (it.variantId && p?.variants) {
+        const variant = p.variants.find(v => v._id.toString() === it.variantId.toString());
+        if (variant) {
+          productWeight = variant.weight || productWeight;
+          productLength = variant.length || productLength;
+          productWidth = variant.width || productWidth;
+          productHeight = variant.height || productHeight;
+        }
       }
+
+      totalWeightGrams += (productWeight * it.quantity);
+      totalLengthCm += (productLength * it.quantity);
+      totalWidthCm += (productWidth * it.quantity);
+      totalHeightCm += (productHeight * it.quantity);
+
       return {
         name: it.name,
         sku: it.variantSku || p?.sku || it.product.toString(),
@@ -578,7 +601,15 @@ router.post("/orders/:id/shiprocket/create", protect, async (req, res) => {
       };
     });
 
-    const weightKg = totalWeightGrams > 0 ? (totalWeightGrams / 1000) : 0.5;
+    // Calculate actual vs volumetric weight
+    const actualWeightKg = totalWeightGrams > 0 ? (totalWeightGrams / 1000) : 0.5;
+    // Volumetric weight formula: (length × width × height) / 5000 for kg
+    const volumetricWeightKg = (totalLengthCm * totalWidthCm * totalHeightCm) / 5000;
+    // Use whichever is larger between actual and volumetric weight
+    const weightKg = Math.max(actualWeightKg, volumetricWeightKg, 0.5);
+    const length = totalLengthCm || 10;
+    const breadth = totalWidthCm || 10;
+    const height = totalHeightCm || 10;
     const cleanPhone = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
 
     const client = createShiprocketClient({ email: srEmail, password: srPassword });
@@ -622,9 +653,9 @@ router.post("/orders/:id/shiprocket/create", protect, async (req, res) => {
       transaction_charges: 0,
       total_discount: Number(order.couponDiscount || 0),
       sub_total: Number(order.totalEstimate || 0),
-      length: 10,
-      breadth: 10,
-      height: 10,
+      length,
+      breadth,
+      height,
       weight: weightKg
     };
 
@@ -831,7 +862,7 @@ router.get("/dashboard", protect, async (req, res) => {
 // Store products CRUD
 router.post("/products", protect, async (req, res) => {
   try {
-    const { name, price, categoryId, subCategoryId, images, stock, weight, gst, description, highlights, specifications, bulkDiscountQuantity, bulkDiscountPriceReduction, mrp, bulkTiers, variants, brandId, minOrderQty, section, hsnCode, sku, packSize } = req.body || {};
+    const { name, price, categoryId, subCategoryId, images, stock, weight, length, width, height, gst, description, highlights, specifications, bulkDiscountQuantity, bulkDiscountPriceReduction, mrp, bulkTiers, variants, brandId, minOrderQty, section, hsnCode, sku, packSize } = req.body || {};
     if (!name || price == null || stock == null || !categoryId) return res.status(400).json({ error: "missing_fields" });
     
     if (brandId && !mongoose.isValidObjectId(brandId)) return res.status(400).json({ error: "invalid_brand" });
@@ -855,6 +886,9 @@ router.post("/products", protect, async (req, res) => {
       images: imgArr,
       stock: Number(stock),
       weight: Number(weight || 0),
+      length: Number(length || 0),
+      width: Number(width || 0),
+      height: Number(height || 0),
       gst: gst == null ? 0 : Number(gst),
       mrp: mrp == null || mrp === "" ? undefined : Number(mrp),
       priceTrend: 0, 
@@ -889,6 +923,9 @@ router.post("/products", protect, async (req, res) => {
           stock: Number(v?.stock ?? 0),
           sku: v?.sku ? String(v.sku).trim() : "",
           weight: Number(v?.weight ?? weight ?? 0),
+          length: Number(v?.length ?? length ?? 0),
+          width: Number(v?.width ?? width ?? 0),
+          height: Number(v?.height ?? height ?? 0),
           isActive: v?.isActive != null ? !!v.isActive : true,
           images: Array.isArray(v?.images) ? v.images.map(i => (typeof i === "string" ? { url: i } : i)).filter(i => i && i.url) : []
         };
@@ -924,7 +961,7 @@ router.put("/products/:id", protect, async (req, res) => {
       return res.status(403).json({ error: "forbidden" });
     }
 
-    const allowed = ["name", "description", "highlights", "specifications", "price", "categoryId", "subCategoryId", "images", "stock", "weight", "gst", "mrp", "isActive", "bulkDiscountQuantity", "bulkDiscountPriceReduction", "bulkTiers", "variants", "brandId", "minOrderQty", "section", "hsnCode", "sku", "packSize"];
+    const allowed = ["name", "description", "highlights", "specifications", "price", "categoryId", "subCategoryId", "images", "stock", "weight", "length", "width", "height", "gst", "mrp", "isActive", "bulkDiscountQuantity", "bulkDiscountPriceReduction", "bulkTiers", "variants", "brandId", "minOrderQty", "section", "hsnCode", "sku", "packSize"];
     const payload = {};
     for (const k of allowed) if (k in req.body) payload[k] = req.body[k];
     if (payload.packSize !== undefined) payload.packSize = Number(payload.packSize || 1);
@@ -991,6 +1028,9 @@ router.put("/products/:id", protect, async (req, res) => {
           stock: v.stock != null ? Number(v.stock) : existingStock,
           sku: v?.sku ? String(v.sku).trim() : "",
           weight: Number(v?.weight ?? 0),
+          length: Number(v?.length ?? 0),
+          width: Number(v?.width ?? 0),
+          height: Number(v?.height ?? 0),
           isActive: v?.isActive != null ? !!v.isActive : true,
           images: Array.isArray(v?.images) ? v.images.map(i => (typeof i === "string" ? { url: i } : i)).filter(i => i && i.url) : []
         };
