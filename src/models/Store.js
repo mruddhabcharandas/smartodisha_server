@@ -30,6 +30,8 @@ const storeSchema = new mongoose.Schema(
     isPopular: { type: Boolean, default: false },
     resetPasswordToken: { type: String },
     resetPasswordExpires: { type: Date },
+    otp: { type: String },
+    otpExpires: { type: Date },
     // Shiprocket & Pickup Details
     pickupAddress: {
       line1: { type: String, default: "" },

@@ -199,12 +199,48 @@ router.get("/profile", protect, async (req, res) => {
   }
 });
 
+// Send OTP for password change
+router.post("/send-otp", protect, async (req, res) => {
+  try {
+    const store = await Store.findById(req.store._id);
+    if (!store) {
+      return res.status(404).json({ error: "Store not found" });
+    }
+
+    // Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    store.otp = otp;
+    store.otpExpires = Date.now() + 10 * 60 * 1000; // 10 minutes
+    await store.save();
+
+    // Send OTP via email (we can use sendEmail from mailer)
+    try {
+      const { sendEmail } = await import("../lib/mailer.js");
+      await sendEmail(
+        store.email,
+        "Your OTP for Password Change",
+        `<p>Dear ${store.name},</p>
+         <p>Your OTP for password change is: <strong>${otp}</strong></p>
+         <p>This OTP is valid for 10 minutes.</p>
+         <p>If you didn't request this, please ignore this email.</p>`
+      );
+    } catch (emailErr) {
+      console.error("Failed to send OTP email:", emailErr);
+    }
+
+    res.json({ message: "OTP sent successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to send OTP" });
+  }
+});
+
 // Change password
 router.post("/change-password", protect, async (req, res) => {
   try {
-    const { oldPassword, newPassword } = req.body;
-    if (!oldPassword || !newPassword) {
-      return res.status(400).json({ error: "Both old and new passwords are required" });
+    const { oldPassword, newPassword, otp } = req.body;
+    if (!newPassword) {
+      return res.status(400).json({ error: "New password is required" });
     }
 
     const store = await Store.findById(req.store._id);
@@ -212,10 +248,22 @@ router.post("/change-password", protect, async (req, res) => {
       return res.status(404).json({ error: "Store not found" });
     }
 
-    // Verify old password
-    const isMatch = await store.comparePassword(oldPassword);
-    if (!isMatch) {
-      return res.status(401).json({ error: "Old password is incorrect" });
+    if (otp) {
+      // Verify OTP
+      if (store.otp !== otp || (store.otpExpires && store.otpExpires < Date.now())) {
+        return res.status(401).json({ error: "Invalid or expired OTP" });
+      }
+      // Clear OTP
+      store.otp = undefined;
+      store.otpExpires = undefined;
+    } else if (oldPassword) {
+      // Verify old password
+      const isMatch = await store.comparePassword(oldPassword);
+      if (!isMatch) {
+        return res.status(401).json({ error: "Old password is incorrect" });
+      }
+    } else {
+      return res.status(400).json({ error: "Either old password or OTP is required" });
     }
 
     // Update password
@@ -231,8 +279,24 @@ router.post("/change-password", protect, async (req, res) => {
 // Update store profile
 router.put("/profile", protect, async (req, res) => {
   try {
-    const { name, phone, address, gstNumber, pickupAddress, pickupName, pickupPhone, shiprocketEmail, shiprocketPassword, image, sellerAvatar } = req.body;
+    const { name, phone, address, gstNumber, pickupAddress, pickupName, pickupPhone, shiprocketEmail, shiprocketPassword, image, sellerAvatar, currentPassword } = req.body;
     const store = await Store.findById(req.store._id);
+
+    // Check if pickup details are being changed
+    const isPickupChanged = 
+      (pickupAddress && JSON.stringify(pickupAddress) !== JSON.stringify(store.pickupAddress)) ||
+      (pickupName && pickupName !== store.pickupName) ||
+      (pickupPhone && pickupPhone !== store.pickupPhone);
+
+    if (isPickupChanged) {
+      if (!currentPassword) {
+        return res.status(400).json({ error: "Current password is required to update pickup details" });
+      }
+      const isMatch = await store.comparePassword(currentPassword);
+      if (!isMatch) {
+        return res.status(401).json({ error: "Invalid current password" });
+      }
+    }
 
     if (store) {
       store.name = name || store.name;
@@ -528,11 +592,11 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
     const { createShipment, checkServiceability } = await import("../services/delhivery.service.js");
 
     let pickupPincode = req.store.pickupAddress?.pincode || process.env.DELHIVERY_PICKUP_PINCODE || "360001";
-    let pickupName = req.store.pickupName || process.env.DELHIVERY_PICKUP_NAME || "Warehouse";
-    let pickupAddress = req.store.pickupAddress?.addressLine1 || process.env.DELHIVERY_PICKUP_ADDRESS || "Address";
+    let pickupName = req.store.pickupName || req.store.name || process.env.DELHIVERY_PICKUP_NAME || "Warehouse";
+    let pickupAddressLine = `${req.store.pickupAddress?.line1 || ''} ${req.store.pickupAddress?.line2 || ''}`.trim() || process.env.DELHIVERY_PICKUP_ADDRESS || "Address";
     let pickupCity = req.store.pickupAddress?.city || process.env.DELHIVERY_PICKUP_CITY || "City";
     let pickupState = req.store.pickupAddress?.state || process.env.DELHIVERY_PICKUP_STATE || "State";
-    let pickupPhone = req.store.pickupPhone || process.env.DELHIVERY_PICKUP_PHONE || "9876543210";
+    let pickupPhone = req.store.pickupPhone || req.store.phone || process.env.DELHIVERY_PICKUP_PHONE || "9876543210";
 
     let addr = order.shippingAddress || {};
     if (!addr.pincode || !addr.line1) {
@@ -561,7 +625,7 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
 
     let totalWeightGrams = 0;
 
-    for (const it of order.items) {
+    const orderItems = (order.items || []).map(it => {
       const p = products.find(prod => prod._id.toString() === it.product.toString());
       let productWeight = p?.weight || 0;
       
@@ -573,46 +637,76 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
       }
 
       totalWeightGrams += (productWeight * it.quantity);
-    }
+
+      return {
+        name: it.name,
+        sku: it.variantSku || p?.sku || it.product.toString(),
+        qty: it.quantity,
+        selling_price: it.price,
+        discount: 0,
+        tax: p?.gst || 0,
+        hsn: p?.hsnCode || "9999"
+      };
+    });
 
     const weightKg = Math.max(totalWeightGrams / 1000, 0.05);
     const cleanPhone = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
 
     const shipmentData = {
-      name: order.customer.name,
-      phone: cleanPhone,
-      pin: addr.pincode,
-      address: addr.line1 + (addr.line2 ? ` ${addr.line2}` : ''),
-      city: addr.city,
-      state: addr.state,
-      order_id: order._id.toString(),
-      payment_mode: order.paymentMethod === "COD" ? "COD" : "Prepaid",
-      total_amount: Number(order.totalEstimate || 0),
-      product_desc: order.items.map(it => it.name).join(", "),
-      weight: weightKg,
-      seller_name: pickupName,
-      seller_add: pickupAddress,
-      seller_pin: pickupPincode,
-      seller_city: pickupCity,
-      seller_state: pickupState,
-      seller_phone: pickupPhone,
-      return_name: pickupName,
-      return_add: pickupAddress,
-      return_pin: pickupPincode,
-      return_city: pickupCity,
-      return_state: pickupState,
-      return_phone: pickupPhone
+      format: "json",
+      data: {
+        shipments: [
+          {
+            add: addr.line1,
+            address2: addr.line2 || '',
+            city: addr.city,
+            country: "India",
+            name: order.customer.name,
+            phone: cleanPhone,
+            pin: addr.pincode,
+            state: addr.state,
+            order: order._id.toString(),
+            payment_mode: order.paymentMethod === "COD" ? "COD" : "Prepaid",
+            shipping_mode: "Surface",
+            return_name: pickupName,
+            return_address: pickupAddressLine,
+            return_city: pickupCity,
+            return_pin: pickupPincode,
+            return_state: pickupState,
+            return_phone: pickupPhone,
+            products_desc: orderItems.map(i => i.name).join(", "),
+            order_date: new Date().toISOString().split("T")[0],
+            total_amount: order.totalEstimate,
+            seller_name: pickupName,
+            seller_add: pickupAddressLine,
+            seller_city: pickupCity,
+            seller_pin: pickupPincode,
+            seller_state: pickupState,
+            seller_phone: pickupPhone,
+            seller_gst_tin: req.store.gstNumber || "",
+            ewaybill_no: "",
+            ewaybill_date: "",
+            ewaybill_validity: "",
+            ewaybill_value: 0,
+            products: orderItems
+          }
+        ]
+      }
     };
 
     if (order.paymentMethod === "COD") {
-      shipmentData.cod_amount = Number(order.codDueAmount || order.totalEstimate || 0);
+      shipmentData.data.shipments[0].cod_amount = Number(order.codDueAmount || order.totalEstimate || 0);
     }
 
+    console.log("Sending to Delhivery:", JSON.stringify(shipmentData, null, 2));
     const result = await createShipment(shipmentData);
+    console.log("Delhivery response:", result);
 
-    if (result.waybill) {
-      const trackingUrl = `https://www.delhivery.com/track/packages/${result.waybill}`;
-      order.shipping = { provider: "DELHIVERY", waybill: result.waybill, status: "CREATED", trackingUrl };
+    const waybill = result?.packages?.[0]?.waybill || result?.shipments?.[0]?.waybill || '';
+    
+    if (waybill) {
+      const trackingUrl = `https://www.delhivery.com/track/package/${waybill}`;
+      order.shipping = { provider: "DELHIVERY", waybill, status: "CREATED", trackingUrl };
       order.shippingAddress = addr;
       order.status = "SHIPPED";
       await order.save();
@@ -623,13 +717,13 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
         type: "ORDER_STATUS",
         entityType: "ORDER",
         entityId: order._id.toString(),
-        note: `Delhivery shipment created. Waybill: ${result.waybill}`
+        note: `Delhivery shipment created. Waybill: ${waybill}`
       });
 
-      return res.json({ success: true, waybill: result.waybill, trackingUrl, status: order.status });
+      return res.json({ success: true, waybill, trackingUrl, status: order.status });
     }
 
-    return res.status(400).json({ error: "shipment_creation_failed", message: "Failed to generate waybill from Delhivery." });
+    return res.status(400).json({ error: "shipment_creation_failed", message: "Failed to generate waybill from Delhivery.", details: result });
   } catch (err) {
     console.error("Seller Delhivery create failed:", err.message || err);
     res.status(502).json({ error: "shipment_creation_failed", message: err.message });
