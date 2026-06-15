@@ -833,25 +833,75 @@ router.get("/orders/:id/shiprocket/label/:awb", protect, async (req, res) => {
 // Get dashboard stats
 router.get("/dashboard", protect, async (req, res) => {
   try {
-    const totalProducts = await Product.countDocuments({ store: req.store._id });
-    const activeProducts = await Product.countDocuments({ store: req.store._id, isActive: true });
-    const outOfStock = await Product.countDocuments({ store: req.store._id, stock: 0 });
+    const storeId = req.store._id;
+    const totalProducts = await Product.countDocuments({ store: storeId });
+    const activeProducts = await Product.countDocuments({ store: storeId, isActive: true });
+    const outOfStock = await Product.countDocuments({ store: storeId, stock: 0 });
 
     // Get recent orders
-    const recentOrders = await Order.find({ store: req.store._id }).sort({ createdAt: -1 }).limit(10);
+    const recentOrders = await Order.find({ store: storeId }).sort({ createdAt: -1 }).limit(10);
 
     // Calculate total revenue
     const totalRevenue = await Order.aggregate([
-      { $match: { store: req.store._id } },
+      { $match: { store: storeId } },
       { $group: { _id: null, total: { $sum: "$storeRevenue" } } }
     ]);
+
+    // Calculate pending and received revenue
+    const revenueBreakdown = await Order.aggregate([
+      { $match: { store: storeId } },
+      { $group: { 
+        _id: null, 
+        pending: { 
+          $sum: { $cond: [ { $in: [ "$status", ["NEW", "PACKED", "PENDING_PAYMENT"] ] }, "$storeRevenue", 0 ] }
+        },
+        received: { 
+          $sum: { $cond: [ { $in: [ "$status", ["DELIVERED", "FULFILLED"] ] }, "$storeRevenue", 0 ] }
+        },
+        totalRevenue: { $sum: "$storeRevenue" }
+      } }
+    ]);
+
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    // Monthly revenue breakdown
+    const monthlyRevenue = await Order.aggregate([
+      { $match: { store: storeId, createdAt: { $gte: startOfMonth } } },
+      { $group: { _id: null, total: { $sum: "$storeRevenue" }, count: { $sum: 1 } } }
+    ]);
+
+    // Top products for this store
+    const topProducts = await Order.aggregate([
+      { $match: { store: storeId, status: { $nin: ["CANCELLED", "PENDING_PAYMENT"] } } },
+      { $unwind: "$items" },
+      { $group: { _id: "$items.product", name: { $first: "$items.name" }, revenue: { $sum: "$items.lineTotal" }, quantity: { $sum: "$items.quantity" } } },
+      { $sort: { revenue: -1 } },
+      { $limit: 5 }
+    ]);
+
+    // Order status breakdown
+    const orderStatusBreakdown = await Order.aggregate([
+      { $match: { store: storeId } },
+      { $group: { _id: "$status", count: { $sum: 1 } } }
+    ]);
+
+    // Format the status breakdown into an object
+    const statusCount = {};
+    orderStatusBreakdown.forEach(item => statusCount[item._id] = item.count);
 
     res.json({
       totalProducts,
       activeProducts,
       outOfStock,
       totalRevenue: totalRevenue[0]?.total || 0,
-      recentOrders
+      pendingRevenue: revenueBreakdown[0]?.pending || 0,
+      receivedRevenue: revenueBreakdown[0]?.received || 0,
+      thisMonthRevenue: monthlyRevenue[0]?.total || 0,
+      thisMonthOrders: monthlyRevenue[0]?.count || 0,
+      recentOrders,
+      topProducts,
+      orderStatus: statusCount
     });
   } catch (err) {
     console.error(err);
@@ -868,6 +918,35 @@ router.post("/products", protect, async (req, res) => {
     if (brandId && !mongoose.isValidObjectId(brandId)) return res.status(400).json({ error: "invalid_brand" });
     if (!mongoose.isValidObjectId(categoryId)) return res.status(400).json({ error: "invalid_category" });
     if (subCategoryId && !mongoose.isValidObjectId(subCategoryId)) return res.status(400).json({ error: "invalid_subcategory" });
+
+    const storePercentage = req.store.storePercentage || 0;
+    
+    // Validate main product price and MRP gap
+    if (mrp !== undefined && mrp !== null && Number(mrp) > 0) {
+      const requiredGap = Number(price) * (storePercentage / 100);
+      if (Number(mrp) - Number(price) < requiredGap - 0.01) { // Small epsilon for floating point errors
+        return res.status(400).json({
+          error: "mrp_insufficient_gap",
+          message: `MRP must be at least ${storePercentage}% higher than price. Current gap is ₹${(Number(mrp) - Number(price)).toFixed(2)}, required gap is ₹${requiredGap.toFixed(2)}`
+        });
+      }
+    }
+
+    // Validate variants price and MRP gaps
+    if (Array.isArray(variants) && variants.length > 0) {
+      for (const v of variants) {
+        if (v.mrp !== undefined && v.mrp !== null && Number(v.mrp) > 0) {
+          const variantPrice = Number(v?.price ?? price);
+          const requiredGap = variantPrice * (storePercentage / 100);
+          if (Number(v.mrp) - variantPrice < requiredGap - 0.01) {
+            return res.status(400).json({
+              error: "variant_mrp_insufficient_gap",
+              message: `Variant MRP must be at least ${storePercentage}% higher than variant price.`
+            });
+          }
+        }
+      }
+    }
 
     const imgArr = Array.isArray(images)
       ? images.map((i) => (typeof i === "string" ? { url: i } : i)).filter((i) => i && i.url)
@@ -1045,10 +1124,44 @@ router.put("/products/:id", protect, async (req, res) => {
       }
     }
 
+    const storePercentage = req.store.storePercentage || 0;
+    
+    // Validate main product price and MRP gap
+    const currentPrice = payload.price !== undefined ? Number(payload.price) : Number(beforeDoc.price);
+    const currentMrp = payload.mrp !== undefined 
+      ? (payload.mrp == null || payload.mrp === "" ? undefined : Number(payload.mrp)) 
+      : (beforeDoc.mrp ? Number(beforeDoc.mrp) : undefined);
+    if (currentMrp !== undefined && currentMrp > 0) {
+      const requiredGap = currentPrice * (storePercentage / 100);
+      if (currentMrp - currentPrice < requiredGap - 0.01) {
+        return res.status(400).json({
+          error: "mrp_insufficient_gap",
+          message: `MRP must be at least ${storePercentage}% higher than price.`
+        });
+      }
+    }
+
+    // Validate variants price and MRP gaps
+    if (Array.isArray(payload.variants) && payload.variants.length > 0) {
+      for (const v of payload.variants) {
+        const variantPrice = Number(v.price ?? 0);
+        const variantMrp = v.mrp !== undefined && v.mrp !== null ? Number(v.mrp) : undefined;
+        if (variantMrp !== undefined && variantMrp > 0) {
+          const requiredGap = variantPrice * (storePercentage / 100);
+          if (variantMrp - variantPrice < requiredGap - 0.01) {
+            return res.status(400).json({
+              error: "variant_mrp_insufficient_gap",
+              message: `Variant MRP must be at least ${storePercentage}% higher than variant price.`
+            });
+          }
+        }
+      }
+    }
+
     if (payload.price != null && beforeDoc) {
       const newPrice = Number(payload.price);
       const oldPrice = Number(beforeDoc.price);
-      const mrp = payload.mrp != null ? Number(payload.mrp) : (beforeDoc.mrp ? Number(beforeDoc.mrp) : newPrice);
+      const mrp = currentMrp !== undefined ? currentMrp : (beforeDoc.mrp ? Number(beforeDoc.mrp) : newPrice);
       if (newPrice > mrp) {
         return res.status(400).json({ error: "price_cannot_exceed_mrp" });
       }

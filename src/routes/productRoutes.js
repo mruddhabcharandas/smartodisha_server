@@ -55,9 +55,23 @@ const withDerived = (p) => {
 };
 
 const sanitizeProduct = (p, canViewPrice) => {
-  let obj = withDerived(p);
+  let obj = p.toObject ? p.toObject() : { ...p };
   const storePercentage = obj.store?.storePercentage || 0;
   
+  // First handle price inflation
+  if (storePercentage > 0) {
+    obj.price = Number((obj.price * (1 + storePercentage / 100)).toFixed(2));
+  }
+  
+  // Calculate discountPercent using user-facing inflated price
+  if (obj.mrp != null && obj.price != null && obj.mrp > obj.price) {
+    obj.discountPercent = Math.round(((Number(obj.mrp) - Number(obj.price)) / Number(obj.mrp)) * 100);
+  }
+  if (obj.packSize == null || obj.packSize === undefined) {
+    obj.packSize = 1;
+  }
+  
+  // Now handle variants
   if (obj.variants && obj.variants.length > 0) {
     obj.variants = obj.variants.map(v => {
       const vObj = v.toObject ? v.toObject() : { ...v };
@@ -77,19 +91,10 @@ const sanitizeProduct = (p, canViewPrice) => {
         if (vObj.price != null) {
           vObj.price = Number((vObj.price * (1 + storePercentage / 100)).toFixed(2));
         }
-        if (vObj.mrp != null) {
-          vObj.mrp = Number((vObj.mrp * (1 + storePercentage / 100)).toFixed(2));
-        }
+        // Don't modify MRP - show exact MRP as set by seller
       }
       return vObj;
     });
-  }
-
-  if (storePercentage > 0) {
-    obj.price = Number((obj.price * (1 + storePercentage / 100)).toFixed(2));
-    if (obj.mrp != null) {
-      obj.mrp = Number((obj.mrp * (1 + storePercentage / 100)).toFixed(2));
-    }
   }
   return obj;
 };
