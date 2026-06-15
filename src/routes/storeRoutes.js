@@ -517,24 +517,22 @@ router.post("/orders/:id/cancel", protect, async (req, res) => {
   }
 });
 
-// Create Shiprocket shipment (seller)
-router.post("/orders/:id/shiprocket/create", protect, async (req, res) => {
+// Create Delhivery shipment (seller)
+router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
   try {
     const order = await Order.findOne({ _id: req.params.id, store: req.store._id });
     if (!order) return res.status(404).json({ error: "order_not_found" });
 
     const Customer = (await import("../models/Customer.js")).default;
-    const { checkServiceability, createShiprocketClient } = await import("../lib/shiprocket.js");
+    const { createShipment, checkServiceability } = await import("../services/delhivery.service.js");
 
-    let srEmail = req.store.shiprocketEmail || process.env.SHIPROCKET_EMAIL;
-    let srPassword = req.store.shiprocketPassword || process.env.SHIPROCKET_PASSWORD;
-    let pickupPincode = req.store.pickupAddress?.pincode || process.env.SHIPROCKET_PICKUP_PINCODE || "360001";
-    let pickupLocation = req.store.pickupName || process.env.SHIPROCKET_PICKUP_NAME || "Warehouse";
-
-    if (!srEmail || !srPassword) {
-      return res.status(400).json({ error: "shiprocket_credentials_missing", message: "Shiprocket credentials are not configured for this store." });
-    }
+    let pickupPincode = req.store.pickupAddress?.pincode || process.env.DELHIVERY_PICKUP_PINCODE || "360001";
+    let pickupName = req.store.pickupName || process.env.DELHIVERY_PICKUP_NAME || "Warehouse";
+    let pickupAddress = req.store.pickupAddress?.addressLine1 || process.env.DELHIVERY_PICKUP_ADDRESS || "Address";
+    let pickupCity = req.store.pickupAddress?.city || process.env.DELHIVERY_PICKUP_CITY || "City";
+    let pickupState = req.store.pickupAddress?.state || process.env.DELHIVERY_PICKUP_STATE || "State";
+    let pickupPhone = req.store.pickupPhone || process.env.DELHIVERY_PICKUP_PHONE || "9876543210";
 
     let addr = order.shippingAddress || {};
     if (!addr.pincode || !addr.line1) {
@@ -562,114 +560,59 @@ router.post("/orders/:id/shiprocket/create", protect, async (req, res) => {
     const products = await Product.find({ _id: { $in: productIds } });
 
     let totalWeightGrams = 0;
-    let totalLengthCm = 0;
-    let totalWidthCm = 0;
-    let totalHeightCm = 0;
 
-    const orderItems = (order.items || []).map(it => {
+    for (const it of order.items) {
       const p = products.find(prod => prod._id.toString() === it.product.toString());
-
-      // Get product dimensions (use variant dimensions if applicable, else product dimensions)
       let productWeight = p?.weight || 0;
-      let productLength = p?.length || 10;
-      let productWidth = p?.width || 10;
-      let productHeight = p?.height || 10;
-
+      
       if (it.variantId && p?.variants) {
         const variant = p.variants.find(v => v._id.toString() === it.variantId.toString());
         if (variant) {
           productWeight = variant.weight || productWeight;
-          productLength = variant.length || productLength;
-          productWidth = variant.width || productWidth;
-          productHeight = variant.height || productHeight;
         }
       }
 
       totalWeightGrams += (productWeight * it.quantity);
-      totalLengthCm += (productLength * it.quantity);
-      totalWidthCm += (productWidth * it.quantity);
-      totalHeightCm += (productHeight * it.quantity);
-
-      return {
-        name: it.name,
-        sku: it.variantSku || p?.sku || it.product.toString(),
-        units: it.quantity,
-        selling_price: Number(it.price || 0),
-        discount: 0,
-        tax: Number(it.gst || 0),
-        hsn: p?.hsn || "9999"
-      };
-    });
-
-    // Calculate actual vs volumetric weight
-    const actualWeightKg = totalWeightGrams > 0 ? (totalWeightGrams / 1000) : 0.5;
-    // Volumetric weight formula: (length × width × height) / 5000 for kg
-    const volumetricWeightKg = (totalLengthCm * totalWidthCm * totalHeightCm) / 5000;
-    // Use whichever is larger between actual and volumetric weight
-    const weightKg = Math.max(actualWeightKg, volumetricWeightKg, 0.5);
-    const length = totalLengthCm || 10;
-    const breadth = totalWidthCm || 10;
-    const height = totalHeightCm || 10;
-    const cleanPhone = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
-
-    const client = createShiprocketClient({ email: srEmail, password: srPassword });
-    
-    // Dynamically resolve pickup location name from Shiprocket account
-    try {
-      const locationsRes = await client.get("/settings/company/pickup");
-      const locations = locationsRes.data?.data?.shipping_address || [];
-      if (locations.length > 0) {
-        const matchedLoc = locations.find(loc => String(loc.pin_code || loc.pincode || "") === String(pickupPincode));
-        if (matchedLoc) {
-          pickupLocation = matchedLoc.pickup_location;
-        } else {
-          pickupLocation = locations[0].pickup_location;
-        }
-        console.log("Dynamically resolved Shiprocket pickup location nickname for store order:", pickupLocation);
-      }
-    } catch (locErr) {
-      console.error("Failed to fetch Shiprocket pickup locations for store, falling back to:", pickupLocation, locErr.message);
     }
 
-    const shipment = {
+    const weightKg = Math.max(totalWeightGrams / 1000, 0.05);
+    const cleanPhone = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
+
+    const shipmentData = {
+      name: order.customer.name,
+      phone: cleanPhone,
+      pin: addr.pincode,
+      address: addr.line1 + (addr.line2 ? ` ${addr.line2}` : ''),
+      city: addr.city,
+      state: addr.state,
       order_id: order._id.toString(),
-      order_date: new Date().toISOString().split('T')[0],
-      pickup_location: pickupLocation,
-      billing_customer_name: order.customer.name,
-      billing_last_name: "",
-      billing_address: addr.line1,
-      billing_address_2: addr.line2,
-      billing_city: addr.city,
-      billing_pincode: addr.pincode,
-      billing_state: addr.state,
-      billing_country: "India",
-      billing_email: order.customer.email || "customer@example.com",
-      billing_phone: cleanPhone,
-      shipping_is_billing: true,
-      order_items: orderItems,
-      payment_method: "Prepaid",
-      shipping_charges: 0,
-      giftwrap_charges: 0,
-      transaction_charges: 0,
-      total_discount: Number(order.couponDiscount || 0),
-      sub_total: Number(order.totalEstimate || 0),
-      length,
-      breadth,
-      height,
-      weight: weightKg
+      payment_mode: order.paymentMethod === "COD" ? "COD" : "Prepaid",
+      total_amount: Number(order.totalEstimate || 0),
+      product_desc: order.items.map(it => it.name).join(", "),
+      weight: weightKg,
+      seller_name: pickupName,
+      seller_add: pickupAddress,
+      seller_pin: pickupPincode,
+      seller_city: pickupCity,
+      seller_state: pickupState,
+      seller_phone: pickupPhone,
+      return_name: pickupName,
+      return_add: pickupAddress,
+      return_pin: pickupPincode,
+      return_city: pickupCity,
+      return_state: pickupState,
+      return_phone: pickupPhone
     };
 
-    const { data } = await client.post("/orders/create/adhoc", shipment);
+    if (order.paymentMethod === "COD") {
+      shipmentData.cod_amount = Number(order.codDueAmount || order.totalEstimate || 0);
+    }
 
-    const awb = data.awb_code;
-    const trackingUrl = `https://shiprocket.co/tracking/${awb}`;
+    const result = await createShipment(shipmentData);
 
-    if (awb) {
-      order.shipping = { provider: "SHIPROCKET", waybill: awb, status: data.status || "CREATED", trackingUrl };
-      order.shiprocketOrderId = data.order_id;
-      order.shiprocketShipmentId = data.shipment_id;
-      order.shiprocketAwbNumber = awb;
-      order.shipment_status = data.status;
+    if (result.waybill) {
+      const trackingUrl = `https://www.delhivery.com/track/packages/${result.waybill}`;
+      order.shipping = { provider: "DELHIVERY", waybill: result.waybill, status: "CREATED", trackingUrl };
       order.shippingAddress = addr;
       order.status = "SHIPPED";
       await order.save();
@@ -680,79 +623,55 @@ router.post("/orders/:id/shiprocket/create", protect, async (req, res) => {
         type: "ORDER_STATUS",
         entityType: "ORDER",
         entityId: order._id.toString(),
-        note: `Shiprocket shipment created. AWB: ${awb}`
+        note: `Delhivery shipment created. Waybill: ${result.waybill}`
       });
 
-      return res.json({ success: true, waybill: awb, trackingUrl, status: order.status });
+      return res.json({ success: true, waybill: result.waybill, trackingUrl, status: order.status });
     }
 
-    return res.status(400).json({ error: "shipment_creation_failed", message: "Failed to generate AWB code from Shiprocket." });
+    return res.status(400).json({ error: "shipment_creation_failed", message: "Failed to generate waybill from Delhivery." });
   } catch (err) {
-    console.error("Seller shiprocket create failed:", err.response?.data || err.message);
-    res.status(502).json({ error: "shipment_creation_failed", message: err.response?.data?.message || err.message });
+    console.error("Seller Delhivery create failed:", err.message || err);
+    res.status(502).json({ error: "shipment_creation_failed", message: err.message });
   }
 });
 
-// Download Shiprocket PDF Label (seller)
-router.get("/orders/:id/shiprocket/label/:awb", protect, async (req, res) => {
-  const awb = req.params.awb;
+// Download Delhivery PDF Label (seller)
+router.get("/orders/:id/delhivery/label/:waybill", protect, async (req, res) => {
+  const waybill = req.params.waybill;
   try {
     const order = await Order.findOne({ _id: req.params.id, store: req.store._id });
     if (!order) return res.status(404).json({ error: "order_not_found" });
 
-    // Get store credentials
-    const storeId = order.store;
-    let srEmail = process.env.SHIPROCKET_EMAIL;
-    let srPassword = process.env.SHIPROCKET_PASSWORD;
-    if (storeId) {
-      const storeObj = await Store.findById(storeId).select("shiprocketEmail shiprocketPassword");
-      if (storeObj?.shiprocketEmail && storeObj?.shiprocketPassword) {
-        srEmail = storeObj.shiprocketEmail;
-        srPassword = storeObj.shiprocketPassword;
+    const { generateLabel } = await import("../services/delhivery.service.js");
+    const labelResult = await generateLabel([waybill]);
+
+    // If Delhivery returns label, use it!
+    if (labelResult.pdfBuffer || labelResult.pdfUrl) {
+      if (labelResult.pdfBuffer) {
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `inline; filename=label_${waybill}.pdf`);
+        return res.send(labelResult.pdfBuffer);
+      } else {
+        const axios = await import("axios");
+        const pdfResponse = await axios.default.get(labelResult.pdfUrl, { responseType: "arraybuffer" });
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `inline; filename=label_${waybill}.pdf`);
+        return res.send(Buffer.from(pdfResponse.data));
       }
     }
 
-    // Get Shiprocket client
-    const { createShiprocketClient } = await import("../lib/shiprocket.js");
-    const client = createShiprocketClient({ email: srEmail, password: srPassword });
-
-    // Call Shiprocket's generate label API
-    const labelResponse = await client.post("/courier/generate/label", {
-      awb_codes: [awb]
-    });
-
-    console.log("Shiprocket label response:", JSON.stringify(labelResponse.data, null, 2));
-
-    // If we get a PDF URL, stream it directly!
-    if (labelResponse.data?.label_url) {
-      // Fetch the PDF from Shiprocket's URL
-      const axios = await import("axios");
-      const pdfResponse = await axios.default.get(labelResponse.data.label_url, {
-        responseType: "arraybuffer"
-      });
-
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
-      return res.send(Buffer.from(pdfResponse.data));
-    } else if (labelResponse.data?.pdf_data) {
-      // Stream directly if available as base64
-      const pdfBuffer = Buffer.from(labelResponse.data.pdf_data, 'base64');
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
-      return res.send(pdfBuffer);
-    }
-
-    // Fallback to custom PDF (simple shipping label only)
+    // Fallback to custom PDF
     const PDFDocument = (await import("pdfkit")).default;
     const doc = new PDFDocument({ margin: 24, size: "A6" });
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
+    res.setHeader("Content-Disposition", `inline; filename=label_${waybill}.pdf`);
     doc.pipe(res);
     
     doc.fontSize(18).text("SHIPPING LABEL", { align: "center", underline: true });
     doc.moveDown(0.5);
-    if (awb) {
-      doc.fontSize(14).text(`AWB: ${awb}`, { align: "center" });
+    if (waybill) {
+      doc.fontSize(14).text(`Waybill: ${waybill}`, { align: "center" });
       doc.moveDown(0.5);
     }
 

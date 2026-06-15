@@ -32,7 +32,7 @@ export const createBillFromData = async ({ customerData, items, paymentType, cou
   if (!cust) throw new Error("customer_not_found");
 
   const ids = items.map((x) => x.productId || x.product);
-  const products = await Product.find({ _id: { $in: ids }, isActive: true });
+  const products = await Product.find({ _id: { $in: ids } });
   
   // Re-verify stock
   for (const it of items) {

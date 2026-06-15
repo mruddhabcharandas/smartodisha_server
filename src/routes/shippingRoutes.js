@@ -62,8 +62,8 @@ router.get("/check-pincode", async (req, res) => {
     const codLimit = Number(process.env.COD_MAX_LIMIT || 20000);
     res.status(200).json({
       pincode,
-      delivery_available: true,
-      cod_available: orderAmount <= codLimit,
+      delivery_available: false,
+      cod_available: false,
       cod_limit: codLimit,
       eta: 3,
       etaStart: addDays(now, 3).toISOString(),
@@ -83,6 +83,7 @@ router.post("/calculate", async (req, res) => {
   const orderAmount = Number(req.body?.order_amount || 0);
   const paymentMethod = String(req.body?.payment_method || "prepaid").toLowerCase();
   const pm = paymentMethod === "cod" ? "COD" : "CASHFREE";
+  const products = req.body.products || [];
 
   try {
     const shippingInfo = await calculateShippingCost({
@@ -90,7 +91,8 @@ router.post("/calculate", async (req, res) => {
       dest,
       totalWeightGrams: weightGrams,
       orderAmount,
-      paymentMethod: pm
+      paymentMethod: pm,
+      products
     });
 
     res.json({
@@ -117,7 +119,8 @@ router.post("/calculate", async (req, res) => {
       dest: null,
       totalWeightGrams: weightGrams,
       orderAmount,
-      paymentMethod: pm
+      paymentMethod: pm,
+      products
     });
 
     res.json({

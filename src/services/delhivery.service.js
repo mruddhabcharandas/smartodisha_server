@@ -11,16 +11,41 @@ const authHeader = () => ({ Authorization: `Token ${token()}` });
 export const checkServiceability = async (pincode) => {
   const b = base();
   if (!b) throw new Error("delhivery_not_configured");
-  const url = `${b}/c/api/pin-codes/json/?filter_codes=${encodeURIComponent(pincode)}`;
-  const res = await fetch(url, { headers: authHeader() });
-  const data = await res.json();
-  const hasCodes = Array.isArray(data) ? data.length > 0 : Array.isArray(data?.delivery_codes) ? data.delivery_codes.length > 0 : !!data;
-  return {
-    pincode,
-    delivery_available: hasCodes,
-    cod_available: hasCodes,
-    eta: 3
-  };
+  try {
+    const url = `${b}/c/api/pin-codes/json/?filter_codes=${encodeURIComponent(pincode)}`;
+    const res = await fetch(url, { headers: authHeader() });
+    const data = await res.json();
+    
+    let delivery_available = false;
+    let cod_available = false;
+    
+    if (Array.isArray(data)) {
+      delivery_available = data.length > 0;
+      cod_available = data.length > 0;
+    } else if (Array.isArray(data?.delivery_codes)) {
+      delivery_available = data.delivery_codes.length > 0;
+      cod_available = data.delivery_codes.some(dc => dc?.postal_code?.cod);
+    } else if (data?.delivery_codes?.[0]) {
+      delivery_available = true;
+      cod_available = !!data.delivery_codes[0].postal_code?.cod;
+    }
+
+    return {
+      pincode,
+      delivery_available,
+      cod_available,
+      eta: 3
+    };
+  } catch (err) {
+    console.error("Delhivery serviceability check failed:", err);
+    // Fallback: if API fails, we can return false or check some local data, but for now return false
+    return {
+      pincode,
+      delivery_available: false,
+      cod_available: false,
+      eta: 3
+    };
+  }
 };
 
 /**

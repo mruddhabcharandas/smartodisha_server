@@ -18,7 +18,7 @@ import { createBillFromData } from "../lib/billing.js";
 import { sendEmail, renderMail } from "../lib/mailer.js";
 import AuditLog from "../models/AuditLog.js";
 import { notifyAdmin } from "../lib/socket.js";
-import shiprocket, { checkServiceability, createShiprocketClient } from "../lib/shiprocket.js";
+
 import { getStoreShippingConfig, calculateShippingCost } from "../lib/shipping.js";
 
 const router = express.Router();
@@ -46,38 +46,33 @@ const validateAndApplyCoupon = async (code, amount) => {
   return { discount, finalAmount: Number((amount - discount).toFixed(2)), couponId: c._id };
 };
 
-const tryCreateShiprocketShipment = async (order) => {
-  console.log('=== Trying to create Shiprocket shipment for order:', order._id.toString());
+const tryCreateDelhiveryShipment = async (order) => {
+  console.log('=== Trying to create Delhivery shipment for order:', order._id.toString());
   try {
     const productIds = (order.items || []).map(it => it.product);
     const products = await Product.find({ _id: { $in: productIds } });
     const storeId = products[0]?.store;
     
-    let srEmail = process.env.SHIPROCKET_EMAIL;
-    let srPassword = process.env.SHIPROCKET_PASSWORD;
-    let pickupPincode = process.env.SHIPROCKET_PICKUP_PINCODE || "360001";
-    let pickupLocation = process.env.SHIPROCKET_PICKUP_NAME || "Warehouse";
+    let pickupPincode = process.env.DELHIVERY_PICKUP_PINCODE || "360001";
+    let pickupName = process.env.DELHIVERY_PICKUP_NAME || "Warehouse";
+    let pickupAddress = process.env.DELHIVERY_PICKUP_ADDRESS || "Address";
+    let pickupCity = process.env.DELHIVERY_PICKUP_CITY || "City";
+    let pickupState = process.env.DELHIVERY_PICKUP_STATE || "State";
+    let pickupPhone = process.env.DELHIVERY_PICKUP_PHONE || "9876543210";
     
     if (storeId) {
-      const storeObj = await Store.findById(storeId).select("shiprocketEmail shiprocketPassword pickupAddress pickupName");
+      const storeObj = await Store.findById(storeId).select("pickupAddress pickupName pickupPhone");
       if (storeObj) {
-        if (storeObj.shiprocketEmail && storeObj.shiprocketPassword) {
-          srEmail = storeObj.shiprocketEmail;
-          srPassword = storeObj.shiprocketPassword;
-        }
-        if (storeObj.pickupAddress?.pincode) {
-          pickupPincode = storeObj.pickupAddress.pincode;
-        }
-        if (storeObj.pickupName) {
-          pickupLocation = storeObj.pickupName;
-        }
+        if (storeObj.pickupAddress?.pincode) pickupPincode = storeObj.pickupAddress.pincode;
+        if (storeObj.pickupName) pickupName = storeObj.pickupName;
+        if (storeObj.pickupAddress?.addressLine1) pickupAddress = storeObj.pickupAddress.addressLine1;
+        if (storeObj.pickupAddress?.city) pickupCity = storeObj.pickupAddress.city;
+        if (storeObj.pickupAddress?.state) pickupState = storeObj.pickupAddress.state;
+        if (storeObj.pickupPhone) pickupPhone = storeObj.pickupPhone;
       }
     }
-    
-    if (!srEmail || !srPassword) {
-      console.log("Shiprocket not configured for store or system, skipping shipment creation");
-      return null;
-    }
+
+    const Customer = (await import("../models/Customer.js")).default;
 
     let addr = order.shippingAddress || {};
     if (!addr.pincode || !addr.line1) {
@@ -106,126 +101,71 @@ const tryCreateShiprocketShipment = async (order) => {
     }
 
     if (!addr.pincode) {
-      console.log("Customer pincode is missing, skipping Shiprocket shipment");
+      console.log("Customer pincode is missing, skipping Delhivery shipment");
       return null;
     }
     if (!addr.line1) {
-      console.log("Customer address is missing, skipping Shiprocket shipment");
+      console.log("Customer address is missing, skipping Delhivery shipment");
       return null;
     }
 
     let totalWeightGrams = 0;
-    let totalLengthCm = 0;
-    let totalWidthCm = 0;
-    let totalHeightCm = 0;
 
-    const orderItems = (order.items || []).map(it => {
+    for (const it of order.items) {
       const p = products.find(prod => prod._id.toString() === it.product.toString());
       
-      // Get product dimensions (use variant dimensions if applicable, else product dimensions)
       let productWeight = p?.weight || 0;
-      let productLength = p?.length || 10;
-      let productWidth = p?.width || 10;
-      let productHeight = p?.height || 10;
 
       if (it.variantId && p?.variants) {
         const variant = p.variants.find(v => v._id.toString() === it.variantId.toString());
         if (variant) {
           productWeight = variant.weight || productWeight;
-          productLength = variant.length || productLength;
-          productWidth = variant.width || productWidth;
-          productHeight = variant.height || productHeight;
         }
       }
 
       totalWeightGrams += (productWeight * it.quantity);
-      totalLengthCm += (productLength * it.quantity);
-      totalWidthCm += (productWidth * it.quantity);
-      totalHeightCm += (productHeight * it.quantity);
-
-      return {
-        name: it.name,
-        sku: it.variantSku || p?.sku || it.product.toString(),
-        units: it.quantity,
-        selling_price: Number(it.price || 0),
-        discount: 0,
-        tax: Number(it.gst || 0),
-        hsn: p?.hsn || "9999"
-      };
-    });
-
-    // Calculate actual vs volumetric weight
-    const actualWeightKg = totalWeightGrams > 0 ? (totalWeightGrams / 1000) : 0.5;
-    // Volumetric weight formula: (length × width × height) / 5000 for kg
-    const volumetricWeightKg = (totalLengthCm * totalWidthCm * totalHeightCm) / 5000;
-    // Use whichever is larger between actual and volumetric weight
-    const weightKg = Math.max(actualWeightKg, volumetricWeightKg, 0.5);
-    // Use average dimensions (or sum)
-    const length = totalLengthCm || 10;
-    const breadth = totalWidthCm || 10;
-    const height = totalHeightCm || 10;
-    const cleanPhone = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
-
-    const client = createShiprocketClient({ email: srEmail, password: srPassword });
-    
-    // Dynamically resolve pickup location name from Shiprocket account
-    try {
-      const locationsRes = await client.get("/settings/company/pickup");
-      const locations = locationsRes.data?.data?.shipping_address || [];
-      if (locations.length > 0) {
-        const matchedLoc = locations.find(loc => String(loc.pin_code || loc.pincode || "") === String(pickupPincode));
-        if (matchedLoc) {
-          pickupLocation = matchedLoc.pickup_location;
-        } else {
-          pickupLocation = locations[0].pickup_location;
-        }
-        console.log("Dynamically resolved Shiprocket pickup location nickname for order:", pickupLocation);
-      }
-    } catch (locErr) {
-      console.error("Failed to fetch Shiprocket pickup locations, falling back to:", pickupLocation, locErr.message);
     }
 
-    const shipment = {
+    const weightKg = Math.max(totalWeightGrams / 1000, 0.05);
+    const cleanPhone = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
+
+    const { createShipment } = await import("../services/delhivery.service.js");
+
+    const shipmentData = {
+      name: order.customer.name,
+      phone: cleanPhone,
+      pin: addr.pincode,
+      address: addr.line1 + (addr.line2 ? ` ${addr.line2}` : ''),
+      city: addr.city,
+      state: addr.state,
       order_id: order._id.toString(),
-      order_date: new Date().toISOString().split('T')[0],
-      pickup_location: pickupLocation,
-      billing_customer_name: order.customer.name,
-      billing_last_name: "",
-      billing_address: addr.line1,
-      billing_address_2: addr.line2,
-      billing_city: addr.city,
-      billing_pincode: addr.pincode,
-      billing_state: addr.state,
-      billing_country: "India",
-      billing_email: order.customer.email || "customer@example.com",
-      billing_phone: cleanPhone,
-      shipping_is_billing: true,
-      order_items: orderItems,
-      payment_method: order.paymentMethod === "COD" ? "COD" : "Prepaid",
-      shipping_charges: Number(order.shippingCost || 0),
-      giftwrap_charges: 0,
-      transaction_charges: 0,
-      total_discount: Number(order.couponDiscount || 0),
-      sub_total: Number(order.totalEstimate || 0),
-      length: length,
-      breadth: breadth,
-      height: height,
-      weight: weightKg
+      payment_mode: order.paymentMethod === "COD" ? "COD" : "Prepaid",
+      total_amount: Number(order.totalEstimate || 0),
+      product_desc: order.items.map(it => it.name).join(", "),
+      weight: weightKg,
+      seller_name: pickupName,
+      seller_add: pickupAddress,
+      seller_pin: pickupPincode,
+      seller_city: pickupCity,
+      seller_state: pickupState,
+      seller_phone: pickupPhone,
+      return_name: pickupName,
+      return_add: pickupAddress,
+      return_pin: pickupPincode,
+      return_city: pickupCity,
+      return_state: pickupState,
+      return_phone: pickupPhone
     };
 
-    const { data } = await client.post("/orders/create/adhoc", shipment);
+    if (order.paymentMethod === "COD") {
+      shipmentData.cod_amount = Number(order.codDueAmount || order.totalEstimate || 0);
+    }
 
-    console.log("Shiprocket order created:", data);
-    const shipmentId = data.shipment_id;
-    const awb = data.awb_code;
-    const trackingUrl = `https://shiprocket.co/tracking/${awb}`;
+    const result = await createShipment(shipmentData);
 
-    if (awb) {
-      order.shipping = { provider: "SHIPROCKET", waybill: awb, status: data.status || "CREATED", trackingUrl };
-      order.shiprocketOrderId = data.order_id;
-      order.shiprocketShipmentId = shipmentId;
-      order.shiprocketAwbNumber = awb;
-      order.shipment_status = data.status;
+    if (result.waybill) {
+      const trackingUrl = `https://www.delhivery.com/track/packages/${result.waybill}`;
+      order.shipping = { provider: "DELHIVERY", waybill: result.waybill, status: "CREATED", trackingUrl };
       order.shippingAddress = addr;
       // Do not auto-set order status to SHIPPED. Keep it as CONFIRMED so seller can manually manage the fulfillment lifecycle.
       await order.save();
@@ -234,7 +174,7 @@ const tryCreateShiprocketShipment = async (order) => {
 
     return null;
   } catch (err) {
-    console.error("Shiprocket Shipment Exception:", err.response?.data || err.message || err);
+    console.error("Delhivery Shipment Exception:", err.message || err);
     // Don't throw, just return null so order creation doesn't fail
     return null;
   }
@@ -380,11 +320,11 @@ export const confirmAndFinalizeOrder = async (order, cashfreePaymentId, cashfree
     console.error("Email notifications failed on finalize:", err);
   }
 
-  // Shiprocket auto creation
+  // Delhivery auto creation
   try {
-    await tryCreateShiprocketShipment(order);
+    await tryCreateDelhiveryShipment(order);
   } catch (err) {
-    console.error("Shiprocket shipment auto-create failed on finalize:", err);
+    console.error("Delhivery shipment auto-create failed on finalize:", err);
   }
 
   // Save the finalized order
@@ -406,19 +346,13 @@ router.post("/", auth, requireRole("customer"), async (req, res) => {
   const products = await Product.find({ _id: { $in: ids }, isActive: true }).populate('store');
   if (products.length !== ids.length) return res.status(400).json({ error: "product_not_found" });
 
-  // Apply store percentage markup to product prices inside the products array before totals and stock validation
+  // Apply store percentage markup to product prices inside the products array before totals and stock validation (ONLY price, NOT MRP!)
   for (const p of products) {
     const storePercentage = p.store?.storePercentage || 0;
     p.price = Number((p.price * (1 + storePercentage / 100)).toFixed(2));
-    if (p.mrp != null) {
-      p.mrp = Number((p.mrp * (1 + storePercentage / 100)).toFixed(2));
-    }
     if (p.variants && p.variants.length > 0) {
       for (const v of p.variants) {
         v.price = Number((v.price * (1 + storePercentage / 100)).toFixed(2));
-        if (v.mrp != null) {
-          v.mrp = Number((v.mrp * (1 + storePercentage / 100)).toFixed(2));
-        }
       }
     }
   }
@@ -602,19 +536,13 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
     const products = await Product.find({ _id: { $in: uniqueIds }, isActive: true }).populate('store');
     if (products.length !== uniqueIds.length) return res.status(400).json({ error: "product_not_found" });
 
-    // Apply store percentage markup to product prices
+    // Apply store percentage markup to product prices (only price, not MRP!)
     for (const p of products) {
       const storePercentage = p.store?.storePercentage || 0;
       p.price = Number((p.price * (1 + storePercentage / 100)).toFixed(2));
-      if (p.mrp != null) {
-        p.mrp = Number((p.mrp * (1 + storePercentage / 100)).toFixed(2));
-      }
       if (p.variants && p.variants.length > 0) {
         for (const v of p.variants) {
           v.price = Number((v.price * (1 + storePercentage / 100)).toFixed(2));
-          if (v.mrp != null) {
-            v.mrp = Number((v.mrp * (1 + storePercentage / 100)).toFixed(2));
-          }
         }
       }
     }
