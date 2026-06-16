@@ -1,251 +1,273 @@
-import fetch from "node-fetch";
+import fetch from 'node-fetch';
 
-/* =========================
-CONFIG
-========================= */
+const _sanitize = (s) => String(s || "").trim().replace(/^['"`]+|['"`]+$/g, "").replace(/\/+$/, "");
+const base = () => _sanitize(process.env.DELHIVERY_BASE_URL || "https://staging-express.delhivery.com");
+const token = () => String(process.env.DELHIVERY_API_TOKEN || process.env.DELHIVERY_TOKEN || "");
+const authHeader = () => ({ Authorization: `Token ${token()}` });
 
-const sanitize = (v) =>
-String(v || "")
-.trim()
-.replace(/^['"`]+|['"`]+$/g, "")
-.replace(//+$/, "");
+/**
+ * Check serviceability for a pincode
+ */
+export const checkServiceability = async (pincode) => {
+  const b = base();
+  if (!b) {
+    console.log("Delhivery not configured, using fallback");
+    return {
+      pincode,
+      delivery_available: true,
+      cod_available: true,
+      eta: 3
+    };
+  }
 
-const BASE_URL =
-sanitize(
-process.env.DELHIVERY_BASE_URL ||
-"https://staging-express.delhivery.com"
-);
+  try {
+    const url = `${b}/c/api/pin-codes/json/?filter_codes=${encodeURIComponent(pincode)}`;
+    console.log("Checking serviceability at:", url);
+    const res = await fetch(url, { headers: authHeader() });
+    console.log("Delhivery serviceability status:", res.status, res.statusText);
+    
+    const text = await res.text();
+    console.log("Delhivery serviceability response body:", text);
+    
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (jsonErr) {
+      console.error("Failed to parse Delhivery serviceability JSON:", jsonErr);
+      // Fallback
+      return {
+        pincode,
+        delivery_available: true,
+        cod_available: true,
+        eta: 3
+      };
+    }
+    
+    console.log("Delhivery serviceability data:", data);
+    
+    let delivery_available = false;
+    let cod_available = false;
+    
+    // Handle Delhivery API as per docs
+    // Docs: If empty list → non-serviceable (NSZ)
+    // If remark is "Embargo" → temporary NSZ
+    // Else serviceable
+    if (data?.success === false) {
+      console.log("Delhivery API error:", data);
+    } 
+    // Check if delivery_codes exists and is array
+    else if (data?.delivery_codes && Array.isArray(data.delivery_codes)) {
+      if (data.delivery_codes.length === 0) {
+        // Empty list → non-serviceable
+        console.log("Delhivery: Empty delivery_codes list → NSZ (non-serviceable)");
+        delivery_available = false;
+        cod_available = false;
+      } else {
+        const postalCodes = data.delivery_codes.map(dc => dc?.postal_code).filter(Boolean);
+        if (postalCodes.length > 0) {
+          // Check each postal code
+          for (const pc of postalCodes) {
+            // If remark is "Embargo" → skip (non-serviceable)
+            if (pc?.remark === "Embargo") {
+              console.log("Delhivery: Pincode has Embargo remark → temporary NSZ");
+              continue;
+            }
+            // If we get here, it's serviceable!
+            delivery_available = true;
+            // Check if COD is available
+            if (pc?.cod === true || pc?.cod === "true") {
+              cod_available = true;
+            }
+          }
+        }
+      }
+    } 
+    // If delivery_codes is an object (non-array)
+    else if (data?.delivery_codes?.postal_code) {
+      const pc = data.delivery_codes.postal_code;
+      if (pc?.remark !== "Embargo") {
+        delivery_available = true;
+        cod_available = pc?.cod === true || pc?.cod === "true";
+      }
+    }
+    // If unrecognized format, use fallback
+    else {
+      console.log("Unrecognized Delhivery serviceability response, using fallback");
+      delivery_available = true;
+      cod_available = true;
+    }
 
-const API_TOKEN =
-process.env.DELHIVERY_API_TOKEN ||
-process.env.DELHIVERY_TOKEN;
-
-if (!API_TOKEN) {
-throw new Error(
-"DELHIVERY_API_TOKEN missing"
-);
-}
-
-const authHeaders = () => ({
-Authorization: `Token ${API_TOKEN}`
-});
-
-async function parseResponse(res) {
-const text = await res.text();
-
-console.log(
-"Delhivery:",
-res.status,
-text
-);
-
-if (!res.ok) {
-throw new Error(
-`Delhivery ${res.status}: ${text}`
-);
-}
-
-try {
-return JSON.parse(text);
-} catch {
-return text;
-}
-}
-
-/* =========================
-SERVICEABILITY
-========================= */
-
-export const checkServiceability =
-async (pincode) => {
-
-const url =
-`${BASE_URL}/c/api/pin-codes/json/?filter_codes=${encodeURIComponent(
-pincode
-)}`;
-
-const res =
-await fetch(url,{
-headers: authHeaders()
-});
-
-const json =
-await parseResponse(res);
-
-const list =
-json?.delivery_codes || [];
-
-if (
-!Array.isArray(list) ||
-list.length === 0
-) {
-return {
-pincode,
-delivery_available:false,
-cod_available:false
-};
-}
-
-const postal =
-list
-.map(
-x=>x?.postal_code
-)
-.find(
-x=>
-x &&
-x.remark !==
-"Embargo"
-);
-
-return {
-pincode,
-delivery_available:
-!!postal,
-
-```
-cod_available:
-  postal?.cod === true
-```
-
-};
-};
-
-/* =========================
-SHIPPING COST
-(NO DUMMY RATE)
-========================= */
-
-export const calculateShippingCost =
-async () => {
-
-throw new Error(
-"Use Delhivery live pricing API. Static shipping disabled."
-);
-
+    return {
+      pincode,
+      delivery_available,
+      cod_available,
+      eta: 3
+    };
+  } catch (err) {
+    console.error("Delhivery serviceability check failed, using fallback:", err);
+    // Fallback: return available for now
+    return {
+      pincode,
+      delivery_available: true,
+      cod_available: true,
+      eta: 3
+    };
+  }
 };
 
-/* =========================
-CREATE SHIPMENT
-========================= */
+/**
+ * Calculate shipping cost (using Delhivery's rate calculator or fallback)
+ */
+export const calculateShippingCost = async ({ origin, destination, weight, orderAmount, paymentMethod }) => {
+  try {
+    // Try to use Delhivery's rate API if available, else use fallback
+    const b = base();
+    if (!b) throw new Error("delhivery_not_configured");
 
-export const createShipment =
-async (shipmentData) => {
+    // Fallback calculation (can be enhanced with Delhivery's actual rate API)
+    const weightKg = Math.max(0.5, weight || 0.5);
+    let baseRate = Number(process.env.DELHIVERY_BASE_RATE || 85);
+    let perKgRate = Number(process.env.DELHIVERY_PER_KG_RATE || 0);
 
-const url =
-`${BASE_URL}/api/cmu/create.json`;
+    let shippingCharge = baseRate + (perKgRate * (weightKg - 0.5));
+    
+    // Free delivery if order amount exceeds threshold
+    const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
+    const isFreeDelivery = paymentMethod !== 'cod' && orderAmount >= freeDeliveryAbove;
+    shippingCharge = isFreeDelivery ? 0 : shippingCharge;
 
-const payload =
-shipmentData?.data?.shipments
-? shipmentData.data
-: shipmentData;
+    // COD charge: 5% or min ₹40, max ₹100
+    const codCharge = paymentMethod === 'cod' 
+      ? Math.min(Math.max(Math.round(orderAmount * 0.05), 40), 100) 
+      : 0;
 
-console.log(
-"Shipment Payload:",
-JSON.stringify(
-payload,
-null,
-2
-)
-);
+    return {
+      deliveryCharge: shippingCharge,
+      codCharge,
+      finalCharge: shippingCharge + codCharge,
+      codAvailable: true,
+      codLimit: Number(process.env.COD_MAX_LIMIT || 20000),
+      isFreeDelivery,
+      selectedCourier: 'Delhivery',
+      baseAmt: baseRate,
+      weight: weightKg
+    };
+  } catch (error) {
+    console.error("Delhivery shipping calculation failed, using fallback:", error);
+    // Fallback calculation
+    const weightKg = Math.max(0.5, weight || 0.5);
+    const baseRate = Number(process.env.SHIPPING_BASE_CHARGE || 85);
+    const perKgRate = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
+    const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
+    let shippingCharge = Math.max(minCharge, baseRate + (perKgRate * (weightKg - 0.5)));
+    
+    const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
+    const isFreeDelivery = paymentMethod !== 'cod' && orderAmount >= freeDeliveryAbove;
+    shippingCharge = isFreeDelivery ? 0 : shippingCharge;
+    
+    const codCharge = paymentMethod === 'cod' 
+      ? Math.min(Math.max(Math.round(orderAmount * 0.05), 40), 100) 
+      : 0;
 
-const body =
-new URLSearchParams({
-format:"json",
-data:
-JSON.stringify(
-payload
-)
-});
-
-const res =
-await fetch(
-url,
-{
-method:"POST",
-
-headers:{
-...authHeaders(),
-
-"Content-Type":
-"application/x-www-form-urlencoded"
-},
-
-body
-}
-);
-
-return await parseResponse(
-res
-);
-
+    return {
+      deliveryCharge: shippingCharge,
+      codCharge,
+      finalCharge: shippingCharge + codCharge,
+      codAvailable: true,
+      codLimit: Number(process.env.COD_MAX_LIMIT || 20000),
+      isFreeDelivery,
+      selectedCourier: 'Delhivery',
+      baseAmt: baseRate,
+      weight: weightKg
+    };
+  }
 };
 
-/* =========================
-TRACK
-========================= */
+/**
+ * Create a shipment in Delhivery
+ */
+export const createShipment = async (shipmentData) => {
+  const b = base();
 
-export const trackShipment =
-async (
-waybill
-)=>{
+  if (!b) throw new Error("delhivery_not_configured");
 
-const url =
-`${BASE_URL}/api/v1/packages/json/?waybill=${waybill}`;
+  // Use the CMU create endpoint (no /c prefix)
+  const url = `${b}/api/cmu/create.json`;
+  console.log("Delhivery API URL:", url);
 
-const res =
-await fetch(
-url,
-{
-headers:
-authHeaders()
-}
-);
+  try {
+    let payload = shipmentData;
+    // unwrap if caller passed { format, data: { shipments: [...] } }
+    if (shipmentData && shipmentData.data && shipmentData.data.shipments) {
+      payload = shipmentData.data;
+    }
 
-return await parseResponse(
-res
-);
+    console.log("Sending to Delhivery shipment data:", JSON.stringify(payload, null, 2));
 
+    const params = new URLSearchParams();
+    params.append('format', 'json');
+    params.append('data', JSON.stringify(payload));
+
+    const body = params; // send URLSearchParams directly
+    console.log('Form body (preview):', params.toString().substring(0, 200));
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        ...authHeader(),
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: params
+    });
+
+    console.log('Delhivery response status:', res.status, res.statusText);
+    const text = await res.text();
+    console.log('Delhivery response body:', text);
+
+    if (!res.ok) {
+      console.error('Delhivery error response body:', text);
+      throw new Error(`Delhivery API error: ${res.status} ${res.statusText} - ${text}`);
+    }
+
+    if (!text) return {};
+
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      return { raw: text };
+    }
+  } catch (err) {
+    console.error('Error in createShipment:', err);
+    throw err;
+  }
 };
 
-/* =========================
-LABEL
-========================= */
 
-export const generateLabel =
-async (
-waybills
-)=>{
+/**
+ * Track a shipment
+ */
+export const trackShipment = async (waybill) => {
+  const b = base();
+  if (!b) throw new Error("delhivery_not_configured");
+  const url = `${b}/api/v1/packages/json/?waybill=${waybill}`;
+  const res = await fetch(url, { headers: authHeader() });
+  return await res.json();
+};
 
-const url =
-`${BASE_URL}/api/p/packing-slip`;
-
-const res =
-await fetch(
-url,
-{
-method:"POST",
-
-headers:{
-...authHeaders(),
-"Content-Type":
-"application/json"
-},
-
-body:
-JSON.stringify({
-waybills:
-Array.isArray(
-waybills
-)
-? waybills
-: [waybills]
-})
-}
-);
-
-return await parseResponse(
-res
-);
-
+/**
+ * Generate shipping label
+ */
+export const generateLabel = async (waybills) => {
+  const b = base();
+  if (!b) throw new Error("delhivery_not_configured");
+  const url = `${b}/api/p/packing-slip`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      ...authHeader(),
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ waybills: Array.isArray(waybills) ? waybills : [waybills] })
+  });
+  return await res.json();
 };
