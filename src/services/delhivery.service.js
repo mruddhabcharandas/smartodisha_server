@@ -5,26 +5,34 @@ const base = () => _sanitize(process.env.DELHIVERY_BASE_URL || "https://staging-
 const token = () => String(process.env.DELHIVERY_API_TOKEN || process.env.DELHIVERY_TOKEN || "");
 const authHeader = () => ({ Authorization: `Token ${token()}` });
 
+// Constants
+const DEFAULT_WEIGHT = 0.5;
+const DEFAULT_BASE_RATE = 85;
+const DEFAULT_PER_KG_RATE = 0;
+const DEFAULT_FREE_DELIVERY_ABOVE = 999;
+const DEFAULT_COD_MAX_LIMIT = 20000;
+
 /**
  * Check serviceability for a pincode
  */
 export const checkServiceability = async (pincode) => {
   const b = base();
-  if (!b) {
+  if (!b || !token()) {
     console.log("Delhivery not configured, using fallback");
-    return {
-      pincode,
-      delivery_available: true,
-      cod_available: true,
-      eta: 3
-    };
+    return getFallbackServiceability(pincode);
   }
 
   try {
     const url = `${b}/c/api/pin-codes/json/?filter_codes=${encodeURIComponent(pincode)}`;
     console.log("Checking serviceability at:", url);
+    
     const res = await fetch(url, { headers: authHeader() });
     console.log("Delhivery serviceability status:", res.status, res.statusText);
+    
+    if (!res.ok) {
+      console.error(`Delhivery API returned ${res.status}`);
+      return getFallbackServiceability(pincode);
+    }
     
     const text = await res.text();
     console.log("Delhivery serviceability response body:", text);
@@ -34,153 +42,214 @@ export const checkServiceability = async (pincode) => {
       data = JSON.parse(text);
     } catch (jsonErr) {
       console.error("Failed to parse Delhivery serviceability JSON:", jsonErr);
-      // Fallback
-      return {
-        pincode,
-        delivery_available: true,
-        cod_available: true,
-        eta: 3
-      };
+      return getFallbackServiceability(pincode);
     }
     
     console.log("Delhivery serviceability data:", data);
     
-    let delivery_available = false;
-    let cod_available = false;
+    // Parse the response
+    const result = parseServiceabilityResponse(data, pincode);
+    console.log("Parsed serviceability result:", result);
     
-    // Handle Delhivery API as per docs
-    // Docs: If empty list → non-serviceable (NSZ)
-    // If remark is "Embargo" → temporary NSZ
-    // Else serviceable
-    if (data?.success === false) {
-      console.log("Delhivery API error:", data);
-    } 
-    // Check if delivery_codes exists and is array
-    else if (data?.delivery_codes && Array.isArray(data.delivery_codes)) {
-      if (data.delivery_codes.length === 0) {
-        // Empty list → non-serviceable
-        console.log("Delhivery: Empty delivery_codes list → NSZ (non-serviceable)");
-        delivery_available = false;
-        cod_available = false;
-      } else {
-        const postalCodes = data.delivery_codes.map(dc => dc?.postal_code).filter(Boolean);
-        if (postalCodes.length > 0) {
-          // Check each postal code
-          for (const pc of postalCodes) {
-            // If remark is "Embargo" → skip (non-serviceable)
-            if (pc?.remark === "Embargo") {
-              console.log("Delhivery: Pincode has Embargo remark → temporary NSZ");
-              continue;
-            }
-            // If we get here, it's serviceable!
-            delivery_available = true;
-            // Check if COD is available
-            if (pc?.cod === true || pc?.cod === "true") {
-              cod_available = true;
-            }
-          }
-        }
-      }
-    } 
-    // If delivery_codes is an object (non-array)
-    else if (data?.delivery_codes?.postal_code) {
-      const pc = data.delivery_codes.postal_code;
-      if (pc?.remark !== "Embargo") {
-        delivery_available = true;
-        cod_available = pc?.cod === true || pc?.cod === "true";
-      }
-    }
-    // If unrecognized format, use fallback
-    else {
-      console.log("Unrecognized Delhivery serviceability response, using fallback");
-      delivery_available = true;
-      cod_available = true;
-    }
-
-    return {
-      pincode,
-      delivery_available,
-      cod_available,
-      eta: 3
-    };
+    return result;
   } catch (err) {
     console.error("Delhivery serviceability check failed, using fallback:", err);
-    // Fallback: return available for now
-    return {
-      pincode,
-      delivery_available: true,
-      cod_available: true,
-      eta: 3
-    };
+    return getFallbackServiceability(pincode);
   }
 };
 
 /**
- * Calculate shipping cost (using Delhivery's rate calculator or fallback)
+ * Parse serviceability response from Delhivery
+ */
+const parseServiceabilityResponse = (data, pincode) => {
+  let delivery_available = false;
+  let cod_available = false;
+  
+  // Check if API returned an error
+  if (data?.success === false) {
+    console.log("Delhivery API error:", data?.rmk || "Unknown error");
+    return getFallbackServiceability(pincode);
+  }
+  
+  // Check for delivery_codes array
+  if (data?.delivery_codes && Array.isArray(data.delivery_codes)) {
+    if (data.delivery_codes.length === 0) {
+      console.log("Delhivery: Empty delivery_codes list → NSZ (non-serviceable)");
+      return getFallbackServiceability(pincode, false);
+    }
+    
+    // Process each delivery code
+    for (const dc of data.delivery_codes) {
+      if (!dc) continue;
+      
+      // Check postal code object
+      const postalCode = dc.postal_code || dc;
+      
+      // If remark is "Embargo" → skip (temporary NSZ)
+      if (postalCode.remark === "Embargo") {
+        console.log("Delhivery: Pincode has Embargo remark → temporary NSZ");
+        continue;
+      }
+      
+      // Check if it's serviceable
+      if (postalCode.postal_code === pincode || !postalCode.postal_code) {
+        delivery_available = true;
+        // Check if COD is available
+        if (postalCode.cod === true || postalCode.cod === "true" || postalCode.cod === 1) {
+          cod_available = true;
+        }
+        break; // Found serviceability for this pincode
+      }
+    }
+  } 
+  // Check for delivery_codes as object
+  else if (data?.delivery_codes?.postal_code) {
+    const pc = data.delivery_codes.postal_code;
+    if (pc.remark !== "Embargo") {
+      delivery_available = true;
+      cod_available = pc.cod === true || pc.cod === "true" || pc.cod === 1;
+    }
+  } 
+  // Handle alternative response format
+  else if (data?.status === "success" && data?.data?.serviceability) {
+    const serviceability = data.data.serviceability;
+    if (Array.isArray(serviceability)) {
+      for (const item of serviceability) {
+        if (item.pincode === pincode) {
+          delivery_available = item.available === true;
+          cod_available = item.cod_available === true;
+          break;
+        }
+      }
+    }
+  }
+  // Fallback if unrecognized format
+  else {
+    console.log("Unrecognized Delhivery serviceability response, using fallback");
+    return getFallbackServiceability(pincode);
+  }
+
+  return {
+    pincode,
+    delivery_available,
+    cod_available,
+    eta: delivery_available ? 3 : null
+  };
+};
+
+/**
+ * Get fallback serviceability response
+ */
+const getFallbackServiceability = (pincode, available = true) => ({
+  pincode,
+  delivery_available: available,
+  cod_available: available,
+  eta: available ? 3 : null
+});
+
+/**
+ * Calculate shipping cost
  */
 export const calculateShippingCost = async ({ origin, destination, weight, orderAmount, paymentMethod }) => {
   try {
-    // Try to use Delhivery's rate API if available, else use fallback
-    const b = base();
-    if (!b) throw new Error("delhivery_not_configured");
-
-    // Fallback calculation (can be enhanced with Delhivery's actual rate API)
-    const weightKg = Math.max(0.5, weight || 0.5);
-    let baseRate = Number(process.env.DELHIVERY_BASE_RATE || 85);
-    let perKgRate = Number(process.env.DELHIVERY_PER_KG_RATE || 0);
-
-    let shippingCharge = baseRate + (perKgRate * (weightKg - 0.5));
+    // Validate inputs
+    const weightKg = Math.max(DEFAULT_WEIGHT, parseFloat(weight) || DEFAULT_WEIGHT);
+    const orderAmt = parseFloat(orderAmount) || 0;
+    const payment = String(paymentMethod || "").toLowerCase();
+    
+    // Get configuration
+    const baseRate = parseFloat(process.env.DELHIVERY_BASE_RATE) || DEFAULT_BASE_RATE;
+    const perKgRate = parseFloat(process.env.DELHIVERY_PER_KG_RATE) || DEFAULT_PER_KG_RATE;
+    const freeDeliveryAbove = parseFloat(process.env.FREE_DELIVERY_ABOVE) || DEFAULT_FREE_DELIVERY_ABOVE;
+    const codMaxLimit = parseFloat(process.env.COD_MAX_LIMIT) || DEFAULT_COD_MAX_LIMIT;
+    
+    // Check if COD is available for this pincode (if destination provided)
+    let codAvailable = true;
+    if (destination) {
+      try {
+        const serviceability = await checkServiceability(destination);
+        codAvailable = serviceability.cod_available;
+      } catch (err) {
+        console.warn("Could not check COD availability, assuming available:", err);
+      }
+    }
+    
+    // Calculate shipping charge
+    let shippingCharge = baseRate + (perKgRate * (weightKg - DEFAULT_WEIGHT));
+    shippingCharge = Math.max(0, shippingCharge); // Ensure non-negative
     
     // Free delivery if order amount exceeds threshold
-    const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
-    const isFreeDelivery = paymentMethod !== 'cod' && orderAmount >= freeDeliveryAbove;
-    shippingCharge = isFreeDelivery ? 0 : shippingCharge;
-
+    const isFreeDelivery = payment !== 'cod' && orderAmt >= freeDeliveryAbove;
+    const finalDeliveryCharge = isFreeDelivery ? 0 : shippingCharge;
+    
     // COD charge: 5% or min ₹40, max ₹100
-    const codCharge = paymentMethod === 'cod' 
-      ? Math.min(Math.max(Math.round(orderAmount * 0.05), 40), 100) 
-      : 0;
-
+    let codCharge = 0;
+    if (payment === 'cod') {
+      codCharge = Math.min(Math.max(Math.round(orderAmt * 0.05), 40), 100);
+      // Only charge COD if COD is available
+      if (!codAvailable) {
+        codCharge = 0;
+      }
+    }
+    
+    // Check if order amount exceeds COD limit
+    const exceedsCodLimit = orderAmt > codMaxLimit;
+    
     return {
-      deliveryCharge: shippingCharge,
-      codCharge,
-      finalCharge: shippingCharge + codCharge,
-      codAvailable: true,
-      codLimit: Number(process.env.COD_MAX_LIMIT || 20000),
+      deliveryCharge: Math.round(finalDeliveryCharge * 100) / 100,
+      codCharge: Math.round(codCharge * 100) / 100,
+      finalCharge: Math.round((finalDeliveryCharge + codCharge) * 100) / 100,
+      codAvailable: codAvailable && !exceedsCodLimit,
+      codLimit: codMaxLimit,
       isFreeDelivery,
       selectedCourier: 'Delhivery',
       baseAmt: baseRate,
-      weight: weightKg
+      weight: weightKg,
+      exceedsCodLimit
     };
   } catch (error) {
     console.error("Delhivery shipping calculation failed, using fallback:", error);
-    // Fallback calculation
-    const weightKg = Math.max(0.5, weight || 0.5);
-    const baseRate = Number(process.env.SHIPPING_BASE_CHARGE || 85);
-    const perKgRate = Number(process.env.SHIPPING_PER_KG_CHARGE || 0);
-    const minCharge = Number(process.env.SHIPPING_MIN_CHARGE || 85);
-    let shippingCharge = Math.max(minCharge, baseRate + (perKgRate * (weightKg - 0.5)));
-    
-    const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
-    const isFreeDelivery = paymentMethod !== 'cod' && orderAmount >= freeDeliveryAbove;
-    shippingCharge = isFreeDelivery ? 0 : shippingCharge;
-    
-    const codCharge = paymentMethod === 'cod' 
-      ? Math.min(Math.max(Math.round(orderAmount * 0.05), 40), 100) 
-      : 0;
-
-    return {
-      deliveryCharge: shippingCharge,
-      codCharge,
-      finalCharge: shippingCharge + codCharge,
-      codAvailable: true,
-      codLimit: Number(process.env.COD_MAX_LIMIT || 20000),
-      isFreeDelivery,
-      selectedCourier: 'Delhivery',
-      baseAmt: baseRate,
-      weight: weightKg
-    };
+    return getFallbackShippingCost({ weight, orderAmount, paymentMethod });
   }
+};
+
+/**
+ * Get fallback shipping cost
+ */
+const getFallbackShippingCost = ({ weight, orderAmount, paymentMethod }) => {
+  const weightKg = Math.max(DEFAULT_WEIGHT, parseFloat(weight) || DEFAULT_WEIGHT);
+  const orderAmt = parseFloat(orderAmount) || 0;
+  const payment = String(paymentMethod || "").toLowerCase();
+  
+  const baseRate = parseFloat(process.env.SHIPPING_BASE_CHARGE) || DEFAULT_BASE_RATE;
+  const perKgRate = parseFloat(process.env.SHIPPING_PER_KG_CHARGE) || DEFAULT_PER_KG_RATE;
+  const minCharge = parseFloat(process.env.SHIPPING_MIN_CHARGE) || DEFAULT_BASE_RATE;
+  const freeDeliveryAbove = parseFloat(process.env.FREE_DELIVERY_ABOVE) || DEFAULT_FREE_DELIVERY_ABOVE;
+  const codMaxLimit = parseFloat(process.env.COD_MAX_LIMIT) || DEFAULT_COD_MAX_LIMIT;
+  
+  let shippingCharge = Math.max(minCharge, baseRate + (perKgRate * (weightKg - DEFAULT_WEIGHT)));
+  
+  const isFreeDelivery = payment !== 'cod' && orderAmt >= freeDeliveryAbove;
+  const finalDeliveryCharge = isFreeDelivery ? 0 : shippingCharge;
+  
+  const codCharge = payment === 'cod' 
+    ? Math.min(Math.max(Math.round(orderAmt * 0.05), 40), 100) 
+    : 0;
+  
+  const exceedsCodLimit = orderAmt > codMaxLimit;
+  
+  return {
+    deliveryCharge: Math.round(finalDeliveryCharge * 100) / 100,
+    codCharge: Math.round(codCharge * 100) / 100,
+    finalCharge: Math.round((finalDeliveryCharge + codCharge) * 100) / 100,
+    codAvailable: !exceedsCodLimit,
+    codLimit: codMaxLimit,
+    isFreeDelivery,
+    selectedCourier: 'Delhivery (Fallback)',
+    baseAmt: baseRate,
+    weight: weightKg,
+    exceedsCodLimit
+  };
 };
 
 /**
@@ -188,73 +257,264 @@ export const calculateShippingCost = async ({ origin, destination, weight, order
  */
 export const createShipment = async (shipmentData) => {
   const b = base();
+  if (!b || !token()) {
+    throw new Error("Delhivery not configured. Please set DELHIVERY_BASE_URL and DELHIVERY_API_TOKEN");
+  }
 
-  if (!b) throw new Error("delhivery_not_configured");
-
-  // Use the CMU create endpoint (no /c prefix)
   const url = `${b}/api/cmu/create.json`;
   console.log("Delhivery API URL:", url);
 
   try {
+    // Prepare payload
     let payload = shipmentData;
-    // unwrap if caller passed { format, data: { shipments: [...] } }
-    if (shipmentData && shipmentData.data && shipmentData.data.shipments) {
+    
+    // Unwrap if needed
+    if (shipmentData?.data?.shipments) {
       payload = shipmentData.data;
     }
-
-    // Payload cleanup to satisfy Delhivery business validations:
-    // - keep original total_amount from order (do NOT recalculate from products)
-    // - remove unsupported fields (products, shipping_mode, ewaybill_value)
-    // - remove empty/null/undefined fields
-    // - set order_date to current date only
-    if (payload && Array.isArray(payload.shipments) && payload.shipments[0]) {
-      const s = payload.shipments[0];
-      
-      // delete empty ewaybill fields
-      if (s.hasOwnProperty('ewaybill_date')) delete s.ewaybill_date;
-      if (s.hasOwnProperty('ewaybill_validity')) delete s.ewaybill_validity;
-
-      // delete ewaybill_no if falsy
-      if (!s.ewaybill_no) delete s.ewaybill_no;
-
-      // delete seller_gst_tin if falsy
-      if (!s.seller_gst_tin) delete s.seller_gst_tin;
-
-      // delete unsupported fields
-      delete s.shipping_mode;
-      delete s.ewaybill_value;
-      delete s.products;
-
-      // keep original total_amount (ensure it's a number)
-      s.total_amount = Number(s.total_amount || 0);
-
-      // remove any empty-string, null or undefined fields
-      Object.keys(s).forEach((k) => {
-        if (s[k] === "" || s[k] === null || s[k] === undefined) {
-          delete s[k];
-        }
-      });
-
-      // ensure order_date is set to current date only (YYYY-MM-DD)
-      if (!s.order_date) {
-        s.order_date = new Date().toISOString().slice(0, 10);
+    
+    // Validate payload structure
+    if (!payload?.shipments?.[0]) {
+      throw new Error("Invalid shipment data: missing shipments array");
+    }
+    
+    // Clean and prepare shipment data
+    const s = payload.shipments[0];
+    
+    // Remove fields that cause validation issues
+    const fieldsToRemove = [
+      'products', 'shipping_mode', 'ewaybill_value', 'ewaybill_date',
+      'ewaybill_validity', 'ewaybill_no', 'seller_gst_tin', 'address2'
+    ];
+    fieldsToRemove.forEach(field => delete s[field]);
+    
+    // Remove empty fields
+    Object.keys(s).forEach(key => {
+      if (s[key] === "" || s[key] === null || s[key] === undefined) {
+        delete s[key];
+      }
+    });
+    
+    // Map common field names to Delhivery expected names
+    const fieldMapping = {
+      'address': 'add',
+      'pincode': 'pin',
+      'order_id': 'order',
+      'orderId': 'order',
+      'zip': 'pin',
+      'zipcode': 'pin'
+    };
+    
+    Object.keys(fieldMapping).forEach(oldKey => {
+      if (s[oldKey] && !s[fieldMapping[oldKey]]) {
+        s[fieldMapping[oldKey]] = s[oldKey];
+        delete s[oldKey];
+      }
+    });
+    
+    // Set required fields with defaults
+    s.total_amount = Math.max(1, Number(s.total_amount) || 1);
+    s.order_date = new Date().toISOString().slice(0, 10);
+    s.weight = Number(s.weight || DEFAULT_WEIGHT);
+    
+    // Validate required Delhivery fields
+    const requiredFields = [
+      'name',      // Customer name
+      'phone',     // Customer phone
+      'add',       // Address
+      'city',      // City
+      'state',     // State
+      'pin',       // Pincode
+      'order'      // Order ID
+    ];
+    
+    for (const field of requiredFields) {
+      if (!String(s[field] || "").trim()) {
+        throw new Error(`Missing required shipment field: ${field}`);
       }
     }
-
-    // Log final payload for debugging
-    console.log('FINAL DELHIVERY PAYLOAD', JSON.stringify(payload, null, 2));
-
-    // Log pickup location for exact name verification in Delhivery panel
-    console.log('pickup_location exact:', payload?.pickup_location);
-
-    console.log("Sending to Delhivery shipment data:", JSON.stringify(payload, null, 2));
-
+    
+    // Set pickup location
+    payload.pickup_location = String(payload.pickup_location || "").trim();
+    if (!payload.pickup_location) {
+      throw new Error("Missing pickup_location");
+    }
+    
+    console.log("FINAL DELHIVERY PAYLOAD", JSON.stringify(payload, null, 2));
+    
+    // Prepare request
     const params = new URLSearchParams();
-    params.append('format', 'json');
-    params.append('data', JSON.stringify(payload));
+    params.append("format", "json");
+    params.append("data", JSON.stringify(payload));
+    
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        ...authHeader(),
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: params
+    });
+    
+    const text = await res.text();
+    console.log("Delhivery response:", text);
+    
+    if (!res.ok) {
+      throw new Error(`Delhivery API error (${res.status}): ${text}`);
+    }
+    
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch (parseError) {
+      console.error("Failed to parse Delhivery response:", parseError);
+      return { raw: text };
+    }
+    
+    // Check for errors in response
+    if (json?.success === false || json?.error) {
+      const errorMsg = json?.rmk || json?.error || "Delhivery shipment creation failed";
+      throw new Error(errorMsg);
+    }
+    
+    // Extract waybill if available
+    if (json?.packages?.[0]?.waybill) {
+      json.waybill = json.packages[0].waybill;
+    }
+    
+    return json;
+    
+  } catch (err) {
+    console.error("Error in createShipment:", err);
+    throw err;
+  }
+};
 
-    console.log('Form body (preview):', params.toString().substring(0, 200));
+/**
+ * Track a shipment
+ */
+export const trackShipment = async (waybill) => {
+  const b = base();
+  if (!b || !token()) {
+    throw new Error("Delhivery not configured");
+  }
+  
+  if (!waybill) {
+    throw new Error("Waybill number is required");
+  }
+  
+  const url = `${b}/api/v1/packages/json/?waybill=${encodeURIComponent(waybill)}`;
+  console.log("Tracking shipment:", url);
+  
+  try {
+    const res = await fetch(url, { headers: authHeader() });
+    
+    if (!res.ok) {
+      throw new Error(`Delhivery tracking API error: ${res.status}`);
+    }
+    
+    const data = await res.json();
+    console.log("Tracking response:", data);
+    
+    // Format tracking response
+    return formatTrackingResponse(data, waybill);
+  } catch (err) {
+    console.error("Error tracking shipment:", err);
+    throw err;
+  }
+};
 
+/**
+ * Format tracking response
+ */
+const formatTrackingResponse = (data, waybill) => {
+  if (data?.ShipmentData?.Shipment?.[0]) {
+    const shipment = data.ShipmentData.Shipment[0];
+    const status = shipment.Status?.Status?.[0] || {};
+    
+    return {
+      waybill: waybill,
+      status: status.Status || 'Unknown',
+      statusCode: status.StatusCode || null,
+      timestamp: status.StatusDateTime || null,
+      location: status.StatusLocation || null,
+      shipments: data.ShipmentData.Shipment,
+      raw: data
+    };
+  }
+  
+  return {
+    waybill: waybill,
+    status: 'Not Found',
+    raw: data
+  };
+};
+
+/**
+ * Generate shipping label
+ */
+export const generateLabel = async (waybills) => {
+  const b = base();
+  if (!b || !token()) {
+    throw new Error("Delhivery not configured");
+  }
+  
+  const waybillArray = Array.isArray(waybills) ? waybills : [waybills];
+  if (waybillArray.length === 0) {
+    throw new Error("At least one waybill is required");
+  }
+  
+  const url = `${b}/api/p/packing-slip`;
+  console.log("Generating label for waybills:", waybillArray);
+  
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        ...authHeader(),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ waybills: waybillArray })
+    });
+    
+    if (!res.ok) {
+      throw new Error(`Delhivery label generation API error: ${res.status}`);
+    }
+    
+    const data = await res.json();
+    console.log("Label generation response:", data);
+    
+    return {
+      success: true,
+      waybills: waybillArray,
+      data: data
+    };
+  } catch (err) {
+    console.error("Error generating label:", err);
+    throw err;
+  }
+};
+
+/**
+ * Cancel a shipment
+ */
+export const cancelShipment = async (waybill) => {
+  const b = base();
+  if (!b || !token()) {
+    throw new Error("Delhivery not configured");
+  }
+  
+  if (!waybill) {
+    throw new Error("Waybill number is required");
+  }
+  
+  const url = `${b}/api/p/cancel`;
+  console.log("Cancelling shipment:", waybill);
+  
+  try {
+    const params = new URLSearchParams();
+    params.append("waybill", waybill);
+    
     const res = await fetch(url, {
       method: 'POST',
       headers: {
@@ -263,63 +523,92 @@ export const createShipment = async (shipmentData) => {
       },
       body: params
     });
-
-    console.log('Delhivery response status:', res.status, res.statusText);
-    const text = await res.text();
-    console.log('Delhivery response body:', text);
-
+    
     if (!res.ok) {
-      console.error('Delhivery error response body:', text);
-      throw new Error(`Delhivery API error: ${res.status} ${res.statusText} - ${text}`);
+      throw new Error(`Delhivery cancellation API error: ${res.status}`);
     }
-
-    if (!text) return {};
-
-    try {
-      const json = JSON.parse(text);
-      if (json?.success === false) {
-        throw new Error(json?.rmk || "Delhivery rejected shipment");
-      }
-      return json;
-    } catch (e) {
-      // If parsing failed, return raw body; otherwise rethrow the error
-      if (e instanceof SyntaxError) {
-        return { raw: text };
-      }
-      throw e;
-    }
+    
+    const data = await res.json();
+    console.log("Cancellation response:", data);
+    
+    return {
+      success: data?.success === true,
+      waybill: waybill,
+      message: data?.rmk || data?.message || "Shipment cancelled",
+      data: data
+    };
   } catch (err) {
-    console.error('Error in createShipment:', err);
+    console.error("Error cancelling shipment:", err);
     throw err;
   }
 };
 
-
 /**
- * Track a shipment
+ * Get pickup time slots
  */
-export const trackShipment = async (waybill) => {
+export const getPickupTimeSlots = async (pickupLocation) => {
   const b = base();
-  if (!b) throw new Error("delhivery_not_configured");
-  const url = `${b}/api/v1/packages/json/?waybill=${waybill}`;
-  const res = await fetch(url, { headers: authHeader() });
-  return await res.json();
+  if (!b || !token()) {
+    throw new Error("Delhivery not configured");
+  }
+  
+  const url = `${b}/api/p/get_pickup_time_slots`;
+  console.log("Getting pickup time slots for:", pickupLocation);
+  
+  try {
+    const params = new URLSearchParams();
+    params.append("pickup_location", pickupLocation);
+    
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        ...authHeader(),
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: params
+    });
+    
+    if (!res.ok) {
+      throw new Error(`Delhivery pickup time API error: ${res.status}`);
+    }
+    
+    const data = await res.json();
+    console.log("Pickup time slots response:", data);
+    
+    return {
+      success: data?.success === true,
+      timeSlots: data?.time_slots || [],
+      data: data
+    };
+  } catch (err) {
+    console.error("Error getting pickup time slots:", err);
+    throw err;
+  }
 };
 
 /**
- * Generate shipping label
+ * Validate pincode format
  */
-export const generateLabel = async (waybills) => {
-  const b = base();
-  if (!b) throw new Error("delhivery_not_configured");
-  const url = `${b}/api/p/packing-slip`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      ...authHeader(),
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ waybills: Array.isArray(waybills) ? waybills : [waybills] })
-  });
-  return await res.json();
+export const validatePincode = (pincode) => {
+  const pincodeStr = String(pincode).trim();
+  return /^[1-9][0-9]{5}$/.test(pincodeStr);
+};
+
+/**
+ * Check if Delhivery is configured
+ */
+export const isDelhiveryConfigured = () => {
+  return !!base() && !!token();
+};
+
+export default {
+  checkServiceability,
+  calculateShippingCost,
+  createShipment,
+  trackShipment,
+  generateLabel,
+  cancelShipment,
+  getPickupTimeSlots,
+  validatePincode,
+  isDelhiveryConfigured
 };
