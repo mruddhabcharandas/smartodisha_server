@@ -169,7 +169,7 @@ export const calculateShippingCost = async ({ origin, destination, weight, order
 export const createShipment = async (shipmentData) => {
   const b = base();
   if (!b) throw new Error("delhivery_not_configured");
-  const url = `${b}/api/cmu/create.json`;
+  const url = `${b}/c/api/cmu/create.json`;
   console.log("Delhivery API URL:", url);
   
   try {
