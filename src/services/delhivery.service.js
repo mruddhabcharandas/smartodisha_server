@@ -174,13 +174,19 @@ export const createShipment = async (shipmentData) => {
   
   try {
     console.log("Sending to Delhivery shipment data:", JSON.stringify(shipmentData, null, 2));
+    
+    // Delhivery expects: application/x-www-form-urlencoded with format=json&data={...}
+    const params = new URLSearchParams();
+    params.append('format', 'json');
+    params.append('data', JSON.stringify(shipmentData));
+    
     const res = await fetch(url, {
       method: 'POST',
       headers: {
         ...authHeader(),
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/x-www-form-urlencoded'
       },
-      body: JSON.stringify(shipmentData)
+      body: params.toString()
     });
 
     console.log("Delhivery response status:", res.status, res.statusText);
