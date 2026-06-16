@@ -48,29 +48,49 @@ export const checkServiceability = async (pincode) => {
     let delivery_available = false;
     let cod_available = false;
     
-    // Handle Delhivery's various response formats
+    // Handle Delhivery API as per docs
+    // Docs: If empty list → non-serviceable (NSZ)
+    // If remark is "Embargo" → temporary NSZ
+    // Else serviceable
     if (data?.success === false) {
       console.log("Delhivery API error:", data);
     } 
-    // Common format: { delivery_codes: [ { postal_code: { cod: true/false } } ] }
+    // Check if delivery_codes exists and is array
     else if (data?.delivery_codes && Array.isArray(data.delivery_codes)) {
-      const postalCodes = data.delivery_codes.map(dc => dc?.postal_code).filter(Boolean);
-      if (postalCodes.length > 0) {
-        delivery_available = true;
-        cod_available = postalCodes.some(pc => pc?.cod === true || pc?.cod === "true");
+      if (data.delivery_codes.length === 0) {
+        // Empty list → non-serviceable
+        console.log("Delhivery: Empty delivery_codes list → NSZ (non-serviceable)");
+        delivery_available = false;
+        cod_available = false;
+      } else {
+        const postalCodes = data.delivery_codes.map(dc => dc?.postal_code).filter(Boolean);
+        if (postalCodes.length > 0) {
+          // Check each postal code
+          for (const pc of postalCodes) {
+            // If remark is "Embargo" → skip (non-serviceable)
+            if (pc?.remark === "Embargo") {
+              console.log("Delhivery: Pincode has Embargo remark → temporary NSZ");
+              continue;
+            }
+            // If we get here, it's serviceable!
+            delivery_available = true;
+            // Check if COD is available
+            if (pc?.cod === true || pc?.cod === "true") {
+              cod_available = true;
+            }
+          }
+        }
       }
     } 
-    // Some versions have { delivery_codes: { postal_code: { cod: ... } } }
+    // If delivery_codes is an object (non-array)
     else if (data?.delivery_codes?.postal_code) {
-      delivery_available = true;
-      cod_available = !!data.delivery_codes.postal_code.cod;
+      const pc = data.delivery_codes.postal_code;
+      if (pc?.remark !== "Embargo") {
+        delivery_available = true;
+        cod_available = pc?.cod === true || pc?.cod === "true";
+      }
     }
-    // Another format: just an array
-    else if (Array.isArray(data) && data.length > 0) {
-      delivery_available = true;
-      cod_available = true;
-    }
-    // If API returns empty or unrecognized, use fallback
+    // If unrecognized format, use fallback
     else {
       console.log("Unrecognized Delhivery serviceability response, using fallback");
       delivery_available = true;

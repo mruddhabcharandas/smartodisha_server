@@ -279,14 +279,15 @@ router.post("/change-password", protect, async (req, res) => {
 // Update store profile
 router.put("/profile", protect, async (req, res) => {
   try {
-    const { name, phone, address, gstNumber, pickupAddress, pickupName, pickupPhone, shiprocketEmail, shiprocketPassword, image, sellerAvatar, currentPassword } = req.body;
+    const { name, phone, address, gstNumber, pickupAddress, pickupName, pickupPhone, delhiveryPickupLocation, shiprocketEmail, shiprocketPassword, image, sellerAvatar, currentPassword } = req.body;
     const store = await Store.findById(req.store._id);
 
     // Check if pickup details are being changed
     const isPickupChanged = 
       (pickupAddress && JSON.stringify(pickupAddress) !== JSON.stringify(store.pickupAddress)) ||
       (pickupName && pickupName !== store.pickupName) ||
-      (pickupPhone && pickupPhone !== store.pickupPhone);
+      (pickupPhone && pickupPhone !== store.pickupPhone) ||
+      (delhiveryPickupLocation !== undefined && delhiveryPickupLocation !== store.delhiveryPickupLocation);
 
     if (isPickupChanged) {
       if (!currentPassword) {
@@ -306,6 +307,7 @@ router.put("/profile", protect, async (req, res) => {
       store.pickupAddress = pickupAddress || store.pickupAddress;
       store.pickupName = pickupName || store.pickupName;
       store.pickupPhone = pickupPhone || store.pickupPhone;
+      store.delhiveryPickupLocation = delhiveryPickupLocation !== undefined ? delhiveryPickupLocation : store.delhiveryPickupLocation;
       store.shiprocketEmail = shiprocketEmail || store.shiprocketEmail;
       store.shiprocketPassword = shiprocketPassword || store.shiprocketPassword;
       
@@ -591,6 +593,7 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
     const Customer = (await import("../models/Customer.js")).default;
     const { createShipment, checkServiceability } = await import("../services/delhivery.service.js");
 
+    const pickupLocationName = req.store.delhiveryPickupLocation || process.env.DELHIVERY_PICKUP_LOCATION || req.store.name || "Warehouse";
     let pickupPincode = req.store.pickupAddress?.pincode || process.env.DELHIVERY_PICKUP_PINCODE || "360001";
     let pickupName = req.store.pickupName || req.store.name || process.env.DELHIVERY_PICKUP_NAME || "Warehouse";
     let pickupAddressLine = `${req.store.pickupAddress?.line1 || ''} ${req.store.pickupAddress?.line2 || ''}`.trim() || process.env.DELHIVERY_PICKUP_ADDRESS || "Address";
@@ -667,6 +670,7 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
     const shipmentData = {
       format: "json",
       data: {
+        pickup_location: pickupLocationName,
         shipments: [
           {
             add: sanitize(addr.line1),
@@ -711,7 +715,7 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
               selling_price: Number(item.selling_price),
               discount: Number(item.discount),
               tax: Number(item.tax),
-              hsn: sanitize(item.hsn)
+              hsn_code: sanitize(item.hsn)
             }))
           }
         ]
