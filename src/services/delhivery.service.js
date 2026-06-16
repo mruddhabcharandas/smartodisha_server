@@ -203,13 +203,13 @@ export const createShipment = async (shipmentData) => {
     }
 
     // Payload cleanup to satisfy Delhivery business validations:
-    // - remove empty ewaybill fields
-    // - remove ewaybill_no / seller_gst_tin when not present
-    // - remove shipping_mode if present
-    // - recalculate total_amount from products
+    // - keep original total_amount from order (do NOT recalculate from products)
+    // - remove unsupported fields (products, shipping_mode, ewaybill_value)
+    // - remove empty/null/undefined fields
     // - set order_date to current date only
     if (payload && Array.isArray(payload.shipments) && payload.shipments[0]) {
       const s = payload.shipments[0];
+      
       // delete empty ewaybill fields
       if (s.hasOwnProperty('ewaybill_date')) delete s.ewaybill_date;
       if (s.hasOwnProperty('ewaybill_validity')) delete s.ewaybill_validity;
@@ -220,42 +220,29 @@ export const createShipment = async (shipmentData) => {
       // delete seller_gst_tin if falsy
       if (!s.seller_gst_tin) delete s.seller_gst_tin;
 
-      // delete shipping_mode if present
-      if (s.hasOwnProperty('shipping_mode')) delete s.shipping_mode;
-
-      // delete ewaybill_value if present
+      // delete unsupported fields
+      delete s.shipping_mode;
       delete s.ewaybill_value;
+      delete s.products;
 
-      // recalculate total_amount only if missing or invalid
-      if (
-        !s.total_amount ||
-        Number(s.total_amount) <= 0
-      ) {
-        if (Array.isArray(s.products)) {
-          s.total_amount = s.products.reduce(
-            (a, p) =>
-              a +
-              (Number(p.selling_price) * Number(p.qty || 1)),
-            0
-          );
-        }
-      }
+      // keep original total_amount (ensure it's a number)
+      s.total_amount = Number(s.total_amount || 0);
 
-      // remove any empty-string, null or undefined fields to avoid Delhivery validation crashes
+      // remove any empty-string, null or undefined fields
       Object.keys(s).forEach((k) => {
         if (s[k] === "" || s[k] === null || s[k] === undefined) {
           delete s[k];
         }
       });
 
-      // remove products array before sending to Delhivery
-      delete s.products;
-
-      // ensure order_date is set to current date only (YYYY-MM-DD) for Delhivery validation
+      // ensure order_date is set to current date only (YYYY-MM-DD)
       if (!s.order_date) {
         s.order_date = new Date().toISOString().slice(0, 10);
       }
     }
+
+    // Log final payload for debugging
+    console.log('FINAL DELHIVERY PAYLOAD', JSON.stringify(payload, null, 2));
 
     // Log pickup location for exact name verification in Delhivery panel
     console.log('pickup_location exact:', payload?.pickup_location);
