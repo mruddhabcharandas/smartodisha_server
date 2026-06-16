@@ -638,8 +638,14 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
 
       totalWeightGrams += (productWeight * it.quantity);
 
-      // Use actual selling price from order item (per unit price)
-      const unitPrice = it.price || p?.sellingPrice || 0;
+      // Use order item price, but fallback to lineTotal/qty when the stored unit price is clearly too low.
+      const reportedUnitPrice = Number(it.price || p?.sellingPrice || 0);
+      const fallbackUnitPrice = it.quantity ? Number((it.lineTotal / it.quantity).toFixed(2)) : reportedUnitPrice;
+      const orderAmount = Number(order.totalEstimate || order.productTotal || 0);
+      const useFallbackPrice = reportedUnitPrice > 0
+        ? (reportedUnitPrice * it.quantity < orderAmount * 0.5 && orderAmount > 20)
+        : true;
+      const unitPrice = useFallbackPrice ? fallbackUnitPrice : reportedUnitPrice;
       
       return {
         name: it.name,
