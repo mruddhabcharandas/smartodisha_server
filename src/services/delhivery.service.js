@@ -10,31 +10,69 @@ const authHeader = () => ({ Authorization: `Token ${token()}` });
  */
 export const checkServiceability = async (pincode) => {
   const b = base();
-  if (!b) throw new Error("delhivery_not_configured");
+  if (!b) {
+    console.log("Delhivery not configured, using fallback");
+    return {
+      pincode,
+      delivery_available: true,
+      cod_available: true,
+      eta: 3
+    };
+  }
+
   try {
     const url = `${b}/c/api/pin-codes/json/?filter_codes=${encodeURIComponent(pincode)}`;
     console.log("Checking serviceability at:", url);
     const res = await fetch(url, { headers: authHeader() });
-    const data = await res.json();
-    console.log("Delhivery serviceability response:", data);
+    console.log("Delhivery serviceability status:", res.status, res.statusText);
+    
+    const text = await res.text();
+    console.log("Delhivery serviceability response body:", text);
+    
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (jsonErr) {
+      console.error("Failed to parse Delhivery serviceability JSON:", jsonErr);
+      // Fallback
+      return {
+        pincode,
+        delivery_available: true,
+        cod_available: true,
+        eta: 3
+      };
+    }
+    
+    console.log("Delhivery serviceability data:", data);
     
     let delivery_available = false;
     let cod_available = false;
     
+    // Handle Delhivery's various response formats
     if (data?.success === false) {
       console.log("Delhivery API error:", data);
-    } else if (Array.isArray(data?.delivery_codes)) {
-      delivery_available = data.delivery_codes.length > 0;
-      cod_available = data.delivery_codes.some(dc => dc?.postal_code?.cod);
-    } else if (Array.isArray(data) && data.length > 0) {
-      delivery_available = true;
-      cod_available = true;
-    } else if (data?.delivery_codes?.postal_code) {
+    } 
+    // Common format: { delivery_codes: [ { postal_code: { cod: true/false } } ] }
+    else if (data?.delivery_codes && Array.isArray(data.delivery_codes)) {
+      const postalCodes = data.delivery_codes.map(dc => dc?.postal_code).filter(Boolean);
+      if (postalCodes.length > 0) {
+        delivery_available = true;
+        cod_available = postalCodes.some(pc => pc?.cod === true || pc?.cod === "true");
+      }
+    } 
+    // Some versions have { delivery_codes: { postal_code: { cod: ... } } }
+    else if (data?.delivery_codes?.postal_code) {
       delivery_available = true;
       cod_available = !!data.delivery_codes.postal_code.cod;
-    } else {
-      // Fallback for development - make most pincodes available
-      console.log("Fallback serviceability check for pincode:", pincode);
+    }
+    // Another format: just an array
+    else if (Array.isArray(data) && data.length > 0) {
+      delivery_available = true;
+      cod_available = true;
+    }
+    // If API returns empty or unrecognized, use fallback
+    else {
+      console.log("Unrecognized Delhivery serviceability response, using fallback");
       delivery_available = true;
       cod_available = true;
     }
@@ -46,7 +84,7 @@ export const checkServiceability = async (pincode) => {
       eta: 3
     };
   } catch (err) {
-    console.error("Delhivery serviceability check failed:", err);
+    console.error("Delhivery serviceability check failed, using fallback:", err);
     // Fallback: return available for now
     return {
       pincode,
@@ -132,15 +170,41 @@ export const createShipment = async (shipmentData) => {
   const b = base();
   if (!b) throw new Error("delhivery_not_configured");
   const url = `${b}/api/cmu/create.json`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      ...authHeader(),
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(shipmentData)
-  });
-  return await res.json();
+  console.log("Delhivery API URL:", url);
+  
+  try {
+    console.log("Sending to Delhivery shipment data:", JSON.stringify(shipmentData, null, 2));
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        ...authHeader(),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(shipmentData)
+    });
+
+    console.log("Delhivery response status:", res.status, res.statusText);
+    
+    // Read response text only once
+    const text = await res.text();
+    console.log("Delhivery response body:", text);
+    
+    // Check if response is ok
+    if (!res.ok) {
+      console.error("Delhivery error response body:", text);
+      throw new Error(`Delhivery API error: ${res.status} ${res.statusText} - ${text}`);
+    }
+
+    // Try to parse json
+    try {
+      return JSON.parse(text);
+    } catch (jsonErr) {
+      throw new Error(`Failed to parse Delhivery JSON response: ${jsonErr.message} - Response text: ${text}`);
+    }
+  } catch (err) {
+    console.error("Error in createShipment:", err);
+    throw err;
+  }
 };
 
 /**

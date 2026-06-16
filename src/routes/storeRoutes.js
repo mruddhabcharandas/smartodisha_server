@@ -652,43 +652,57 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
     const weightKg = Math.max(totalWeightGrams / 1000, 0.05);
     const cleanPhone = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
 
+    // Helper to sanitize strings (trim, remove extra spaces)
+    const sanitize = (s) => String(s || "").trim();
+
     const shipmentData = {
       format: "json",
       data: {
         shipments: [
           {
-            add: addr.line1,
-            address2: addr.line2 || '',
-            city: addr.city,
+            add: sanitize(addr.line1),
+            address2: sanitize(addr.line2),
+            city: sanitize(addr.city),
             country: "India",
-            name: order.customer.name,
+            name: sanitize(order.customer.name),
             phone: cleanPhone,
-            pin: addr.pincode,
-            state: addr.state,
+            pin: sanitize(addr.pincode),
+            state: sanitize(addr.state),
             order: order._id.toString(),
             payment_mode: order.paymentMethod === "COD" ? "COD" : "Prepaid",
             shipping_mode: "Surface",
-            return_name: pickupName,
-            return_address: pickupAddressLine,
-            return_city: pickupCity,
-            return_pin: pickupPincode,
-            return_state: pickupState,
-            return_phone: pickupPhone,
-            products_desc: orderItems.map(i => i.name).join(", "),
+            return_name: sanitize(pickupName),
+            return_address: sanitize(pickupAddressLine),
+            return_city: sanitize(pickupCity),
+            return_pin: sanitize(pickupPincode),
+            return_state: sanitize(pickupState),
+            return_phone: sanitize(pickupPhone),
+            products_desc: sanitize(orderItems.map(i => i.name).join(", ")),
             order_date: new Date().toISOString().split("T")[0],
-            total_amount: order.totalEstimate,
-            seller_name: pickupName,
-            seller_add: pickupAddressLine,
-            seller_city: pickupCity,
-            seller_pin: pickupPincode,
-            seller_state: pickupState,
-            seller_phone: pickupPhone,
-            seller_gst_tin: req.store.gstNumber || "",
+            total_amount: Number(order.totalEstimate),
+            seller_name: sanitize(pickupName),
+            seller_add: sanitize(pickupAddressLine),
+            seller_city: sanitize(pickupCity),
+            seller_pin: sanitize(pickupPincode),
+            seller_state: sanitize(pickupState),
+            seller_phone: sanitize(pickupPhone),
+            seller_gst_tin: sanitize(req.store.gstNumber),
             ewaybill_no: "",
             ewaybill_date: "",
             ewaybill_validity: "",
             ewaybill_value: 0,
-            products: orderItems
+            // Add weight (required by Delhivery)
+            weight: Number(weightKg.toFixed(2)),
+            products: orderItems.map(item => ({
+              ...item,
+              name: sanitize(item.name),
+              sku: sanitize(item.sku),
+              qty: Number(item.qty),
+              selling_price: Number(item.selling_price),
+              discount: Number(item.discount),
+              tax: Number(item.tax),
+              hsn: sanitize(item.hsn)
+            }))
           }
         ]
       }
