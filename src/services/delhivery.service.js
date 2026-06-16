@@ -202,6 +202,30 @@ export const createShipment = async (shipmentData) => {
       payload = shipmentData.data;
     }
 
+    // Payload cleanup to satisfy Delhivery business validations:
+    // - remove empty ewaybill fields
+    // - remove ewaybill_no / seller_gst_tin when not present
+    // - set order_date to current ISO datetime (no timezone offset)
+    // - log pickup_location for exact match checks
+    if (payload && Array.isArray(payload.shipments) && payload.shipments[0]) {
+      const s = payload.shipments[0];
+      // delete empty ewaybill fields
+      if (s.hasOwnProperty('ewaybill_date')) delete s.ewaybill_date;
+      if (s.hasOwnProperty('ewaybill_validity')) delete s.ewaybill_validity;
+
+      // delete ewaybill_no if falsy
+      if (!s.ewaybill_no) delete s.ewaybill_no;
+
+      // delete seller_gst_tin if falsy
+      if (!s.seller_gst_tin) delete s.seller_gst_tin;
+
+      // set order_date to current server datetime in 'YYYY-MM-DD HH:MM:SS' format
+      s.order_date = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    }
+
+    // Log pickup location for exact name verification in Delhivery panel
+    console.log('pickup:', payload?.pickup_location);
+
     console.log("Sending to Delhivery shipment data:", JSON.stringify(payload, null, 2));
 
     const params = new URLSearchParams();
