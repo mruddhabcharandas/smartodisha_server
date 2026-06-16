@@ -219,6 +219,13 @@ export const createShipment = async (shipmentData) => {
       // delete seller_gst_tin if falsy
       if (!s.seller_gst_tin) delete s.seller_gst_tin;
 
+      // remove any empty-string, null or undefined fields to avoid Delhivery validation crashes
+      Object.keys(s).forEach((k) => {
+        if (s[k] === "" || s[k] === null || s[k] === undefined) {
+          delete s[k];
+        }
+      });
+
       // set order_date to current date only (YYYY-MM-DD) for Delhivery validation
       s.order_date = new Date().toISOString().slice(0, 10);
     }
@@ -255,9 +262,17 @@ export const createShipment = async (shipmentData) => {
     if (!text) return {};
 
     try {
-      return JSON.parse(text);
+      const json = JSON.parse(text);
+      if (json?.success === false) {
+        throw new Error(json?.rmk || "Delhivery rejected shipment");
+      }
+      return json;
     } catch (e) {
-      return { raw: text };
+      // If parsing failed, return raw body; otherwise rethrow the error
+      if (e instanceof SyntaxError) {
+        return { raw: text };
+      }
+      throw e;
     }
   } catch (err) {
     console.error('Error in createShipment:', err);
