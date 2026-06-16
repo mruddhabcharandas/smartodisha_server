@@ -638,14 +638,17 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
 
       totalWeightGrams += (productWeight * it.quantity);
 
+      // Use actual selling price from order item (per unit price)
+      const unitPrice = it.price || p?.sellingPrice || 0;
+      
       return {
         name: it.name,
         sku: it.variantSku || p?.sku || it.product.toString(),
         qty: it.quantity,
-        selling_price: it.price,
-        discount: 0,
-        tax: p?.gst || 0,
-        hsn: p?.hsnCode || "9999"
+        selling_price: Number(unitPrice),
+        discount: Number(it.discountPerUnit || 0),
+        tax: Number(p?.gst || 0),
+        hsn: String(p?.hsnCode || "9999")
       };
     });
 
@@ -709,7 +712,13 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
     };
 
     if (order.paymentMethod === "COD") {
-      shipmentData.data.shipments[0].cod_amount = Number(order.codDueAmount || order.totalEstimate || 0);
+      // COD logic: Customer pays 15% advance, remaining 85% at delivery
+      const shippingCharge = Number(order.shippingCost || 0);
+      const baseAmount = Number(order.productTotal || order.totalEstimate || 0);
+      const totalPayable = baseAmount + shippingCharge;
+      const codAdvancePercent = 0.15;
+      const codDueAmount = totalPayable * (1 - codAdvancePercent); // 85% of total
+      shipmentData.data.shipments[0].cod_amount = Number(codDueAmount.toFixed(2));
     }
 
     console.log("Sending to Delhivery:", JSON.stringify(shipmentData, null, 2));
