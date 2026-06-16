@@ -173,12 +173,20 @@ export const createShipment = async (shipmentData) => {
   console.log("Delhivery API URL:", url);
   
   try {
-    console.log("Sending to Delhivery shipment data:", JSON.stringify(shipmentData, null, 2));
+    // Extract actual payload (remove double-wrapping if present)
+    let payload = shipmentData;
+    if (shipmentData?.data?.shipments) {
+      payload = shipmentData.data; // Use nested data if double-wrapped
+    }
+    
+    console.log("Sending to Delhivery shipment data:", JSON.stringify(payload, null, 2));
     
     // Delhivery expects: application/x-www-form-urlencoded with format=json&data={...}
     const params = new URLSearchParams();
     params.append('format', 'json');
-    params.append('data', JSON.stringify(shipmentData));
+    params.append('data', JSON.stringify(payload));
+    
+    console.log("Form body:", params.toString().substring(0, 200)); // Log first 200 chars of body
     
     const res = await fetch(url, {
       method: 'POST',
