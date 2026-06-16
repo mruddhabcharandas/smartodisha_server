@@ -205,8 +205,9 @@ export const createShipment = async (shipmentData) => {
     // Payload cleanup to satisfy Delhivery business validations:
     // - remove empty ewaybill fields
     // - remove ewaybill_no / seller_gst_tin when not present
-    // - set order_date to current ISO datetime (no timezone offset)
-    // - log pickup_location for exact match checks
+    // - remove shipping_mode if present
+    // - recalculate total_amount from products
+    // - set order_date to current date only
     if (payload && Array.isArray(payload.shipments) && payload.shipments[0]) {
       const s = payload.shipments[0];
       // delete empty ewaybill fields
@@ -218,6 +219,18 @@ export const createShipment = async (shipmentData) => {
 
       // delete seller_gst_tin if falsy
       if (!s.seller_gst_tin) delete s.seller_gst_tin;
+
+      // delete shipping_mode if present
+      if (s.hasOwnProperty('shipping_mode')) delete s.shipping_mode;
+
+      if (Array.isArray(s.products)) {
+        s.total_amount = s.products.reduce(
+          (a, p) =>
+            a +
+            (Number(p.selling_price) * Number(p.qty || 1)),
+          0
+        );
+      }
 
       // remove any empty-string, null or undefined fields to avoid Delhivery validation crashes
       Object.keys(s).forEach((k) => {
@@ -231,7 +244,7 @@ export const createShipment = async (shipmentData) => {
     }
 
     // Log pickup location for exact name verification in Delhivery panel
-    console.log('pickup:', payload?.pickup_location);
+    console.log('pickup_location exact:', payload?.pickup_location);
 
     console.log("Sending to Delhivery shipment data:", JSON.stringify(payload, null, 2));
 
