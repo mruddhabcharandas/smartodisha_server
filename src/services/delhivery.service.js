@@ -219,8 +219,8 @@ export const createShipment = async (shipmentData) => {
       // delete seller_gst_tin if falsy
       if (!s.seller_gst_tin) delete s.seller_gst_tin;
 
-      // set order_date to current server datetime in 'YYYY-MM-DD HH:MM:SS' format
-      s.order_date = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      // set order_date to current date only (YYYY-MM-DD) for Delhivery validation
+      s.order_date = new Date().toISOString().slice(0, 10);
     }
 
     // Log pickup location for exact name verification in Delhivery panel
@@ -232,7 +232,6 @@ export const createShipment = async (shipmentData) => {
     params.append('format', 'json');
     params.append('data', JSON.stringify(payload));
 
-    const body = params; // send URLSearchParams directly
     console.log('Form body (preview):', params.toString().substring(0, 200));
 
     const res = await fetch(url, {
