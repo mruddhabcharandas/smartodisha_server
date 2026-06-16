@@ -688,7 +688,8 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
             return_phone: sanitize(pickupPhone),
             products_desc: sanitize(orderItems.map(i => i.name).join(", ")),
             order_date: new Date().toISOString().split("T")[0],
-            total_amount: Number(order.totalEstimate),
+            // Use product total + shipping cost, not the full totalEstimate that includes COD surcharge
+            total_amount: Number((order.productTotal || 0) + (order.shippingCost || 0)),
             seller_name: sanitize(pickupName),
             seller_add: sanitize(pickupAddressLine),
             seller_city: sanitize(pickupCity),
@@ -718,13 +719,13 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
     };
 
     if (order.paymentMethod === "COD") {
-      // COD logic: Customer pays 15% advance, remaining 85% at delivery
+      const productTotal = Number(order.productTotal || 0);
       const shippingCharge = Number(order.shippingCost || 0);
-      const baseAmount = Number(order.productTotal || order.totalEstimate || 0);
-      const totalPayable = baseAmount + shippingCharge;
-      const codAdvancePercent = 0.15;
-      const codDueAmount = totalPayable * (1 - codAdvancePercent); // 85% of total
-      shipmentData.data.shipments[0].cod_amount = Number(codDueAmount.toFixed(2));
+      const totalAmount = productTotal + shippingCharge;
+      const advanceAmount = Math.ceil(totalAmount * 0.15);
+      const codDueAmount = Number((totalAmount - advanceAmount).toFixed(2));
+      shipmentData.data.shipments[0].cod_amount = codDueAmount;
+      shipmentData.data.shipments[0].total_amount = totalAmount;
     }
 
     console.log("Sending to Delhivery:", JSON.stringify(shipmentData, null, 2));
