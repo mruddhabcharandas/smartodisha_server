@@ -223,13 +223,22 @@ export const createShipment = async (shipmentData) => {
       // delete shipping_mode if present
       if (s.hasOwnProperty('shipping_mode')) delete s.shipping_mode;
 
-      if (Array.isArray(s.products)) {
-        s.total_amount = s.products.reduce(
-          (a, p) =>
-            a +
-            (Number(p.selling_price) * Number(p.qty || 1)),
-          0
-        );
+      // delete ewaybill_value if present
+      delete s.ewaybill_value;
+
+      // recalculate total_amount only if missing or invalid
+      if (
+        !s.total_amount ||
+        Number(s.total_amount) <= 0
+      ) {
+        if (Array.isArray(s.products)) {
+          s.total_amount = s.products.reduce(
+            (a, p) =>
+              a +
+              (Number(p.selling_price) * Number(p.qty || 1)),
+            0
+          );
+        }
       }
 
       // remove any empty-string, null or undefined fields to avoid Delhivery validation crashes
@@ -239,8 +248,13 @@ export const createShipment = async (shipmentData) => {
         }
       });
 
-      // set order_date to current date only (YYYY-MM-DD) for Delhivery validation
-      s.order_date = new Date().toISOString().slice(0, 10);
+      // remove products array before sending to Delhivery
+      delete s.products;
+
+      // ensure order_date is set to current date only (YYYY-MM-DD) for Delhivery validation
+      if (!s.order_date) {
+        s.order_date = new Date().toISOString().slice(0, 10);
+      }
     }
 
     // Log pickup location for exact name verification in Delhivery panel
