@@ -379,8 +379,13 @@ router.get("/delhivery/label/:waybill", auth, requireRole(["admin", "seller"]), 
   try {
     const labelData = await delhivery.generateLabel(waybill);
     if (labelData?.success) {
+      if (labelData.pdfBuffer) {
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `inline; filename=label_${waybill}.pdf`);
+        return res.send(labelData.pdfBuffer);
+      }
       // If we get a PDF URL, stream it
-      const pdfUrl = labelData?.pdf_url;
+      const pdfUrl = labelData?.pdf_url || labelData?.data?.pdf_url || labelData?.data?.packages?.[0]?.pdf_url;
       if (pdfUrl) {
         const fetch = (await import('node-fetch')).default;
         const pdfRes = await fetch(pdfUrl);

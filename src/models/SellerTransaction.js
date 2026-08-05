@@ -9,7 +9,7 @@ const sellerTransactionSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ["EARNING", "PAYOUT"],
+      enum: ["EARNING", "PAYOUT", "DEDUCTION"],
       required: true
     },
     amount: {
@@ -25,6 +25,10 @@ const sellerTransactionSchema = new mongoose.Schema(
       default: ""
     },
     note: {
+      type: String,
+      default: ""
+    },
+    proofImage: {
       type: String,
       default: ""
     }

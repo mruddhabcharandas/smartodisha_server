@@ -495,13 +495,29 @@ export const generateLabel = async (waybills) => {
         format: "html",
         html: htmlText
       };
-    } else {
-      const data = await res.json();
+    } else if (contentType.includes("pdf")) {
+      const pdfBuffer = await res.buffer();
       return {
         success: true,
-        format: "json",
-        data: data
+        format: "pdf",
+        pdfBuffer: pdfBuffer
       };
+    } else {
+      try {
+        const data = await res.json();
+        return {
+          success: true,
+          format: "json",
+          data: data
+        };
+      } catch (e) {
+        const rawBuffer = await res.buffer();
+        return {
+          success: true,
+          format: "pdf",
+          pdfBuffer: rawBuffer
+        };
+      }
     }
   } catch (err) {
     console.error("Error generating label:", err);
