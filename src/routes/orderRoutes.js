@@ -131,9 +131,11 @@ const tryCreateDelhiveryShipment = async (order) => {
 
     const { createShipment, createWarehouse } = await import("../services/delhivery.service.js");
 
+    const cleanLocationName = `${pickupName}_${String(pickupPincode).trim()}`.toUpperCase().replace(/[^A-Z0-9_]/g, "_");
+
     try {
       await createWarehouse({
-        name: pickupName,
+        name: cleanLocationName,
         pin: pickupPincode,
         phone: pickupPhone,
         add: pickupAddress,
@@ -145,6 +147,7 @@ const tryCreateDelhiveryShipment = async (order) => {
     }
 
     const shipmentData = {
+      pickup_location: cleanLocationName,
       name: order.customer.name,
       phone: cleanPhone,
       pin: addr.pincode,

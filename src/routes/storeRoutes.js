@@ -593,8 +593,9 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
     const Customer = (await import("../models/Customer.js")).default;
     const { createShipment, checkServiceability, createWarehouse } = await import("../services/delhivery.service.js");
 
-    const pickupLocationName = req.store.delhiveryPickupLocation || process.env.DELHIVERY_PICKUP_LOCATION || req.store.name || "Warehouse";
     let pickupPincode = req.store.pickupAddress?.pincode || process.env.DELHIVERY_PICKUP_PINCODE || "360001";
+    const baseLocationName = req.store.name || "Warehouse";
+    const pickupLocationName = `${baseLocationName}_${String(pickupPincode).trim()}`.toUpperCase().replace(/[^A-Z0-9_]/g, "_");
     let pickupName = req.store.pickupName || req.store.name || process.env.DELHIVERY_PICKUP_NAME || "Warehouse";
     let pickupAddressLine = `${req.store.pickupAddress?.line1 || ''} ${req.store.pickupAddress?.line2 || ''}`.trim() || process.env.DELHIVERY_PICKUP_ADDRESS || "Address";
     let pickupCity = req.store.pickupAddress?.city || process.env.DELHIVERY_PICKUP_CITY || "City";
