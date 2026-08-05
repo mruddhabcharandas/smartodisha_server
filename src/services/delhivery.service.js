@@ -608,13 +608,15 @@ export const createWarehouse = async (pickupLocation) => {
 
   try {
     const payload = {
-      registered_name: String(pickupLocation.name || "").trim(),
-      pincode: String(pickupLocation.pin || "").trim(),
+      name: String(pickupLocation.name || "").trim(),
+      pin: String(pickupLocation.pin || "").trim(),
       phone: String(pickupLocation.phone || "").replace(/\D/g, "").slice(-10),
       address: String(pickupLocation.add || "").trim(),
       city: String(pickupLocation.city || "").trim(),
       state: String(pickupLocation.state || "").trim(),
-      country: "India"
+      country: "India",
+      return_address: String(pickupLocation.add || "").trim(),
+      return_pin: String(pickupLocation.pin || "").trim()
     };
 
     console.log("Registering Delhivery warehouse payload:", JSON.stringify(payload, null, 2));
