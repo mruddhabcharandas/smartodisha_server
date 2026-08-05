@@ -48,7 +48,7 @@ const orderSchema = new mongoose.Schema(
     notes: { type: String, default: "" },
     feedbackRating: { type: Number, min: 1, max: 5 },
     shipping: {
-      provider: { type: String, default: "SHIPROCKET" },
+      provider: { type: String, default: "DELHIVERY" },
       waybill: { type: String },
       status: { type: String },
       trackingUrl: { type: String }

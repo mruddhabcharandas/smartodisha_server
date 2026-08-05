@@ -595,8 +595,56 @@ export const validatePincode = (pincode) => {
 };
 
 /**
- * Check if Delhivery is configured
+ * Register a client warehouse (pickup location) in Delhivery
  */
+export const createWarehouse = async (pickupLocation) => {
+  const b = base();
+  if (!b || !token()) {
+    throw new Error("Delhivery not configured. Please set DELHIVERY_BASE_URL and DELHIVERY_API_TOKEN");
+  }
+
+  const url = `${b}/api/backend/clientwarehouse/create/`;
+  console.log("Registering Delhivery warehouse:", url);
+
+  try {
+    const payload = {
+      registered_name: String(pickupLocation.name || "").trim(),
+      pincode: String(pickupLocation.pin || "").trim(),
+      phone: String(pickupLocation.phone || "").replace(/\D/g, "").slice(-10),
+      address: String(pickupLocation.add || "").trim(),
+      city: String(pickupLocation.city || "").trim(),
+      state: String(pickupLocation.state || "").trim(),
+      country: "India"
+    };
+
+    console.log("Registering Delhivery warehouse payload:", JSON.stringify(payload, null, 2));
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        ...authHeader(),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const text = await res.text();
+    console.log("Delhivery warehouse register response:", text);
+
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = { raw: text };
+    }
+
+    return json;
+  } catch (error) {
+    console.error("Error in createWarehouse:", error);
+    throw error;
+  }
+};
+
 export const isDelhiveryConfigured = () => {
   return !!base() && !!token();
 };
@@ -610,5 +658,6 @@ export default {
   cancelShipment,
   getPickupTimeSlots,
   validatePincode,
-  isDelhiveryConfigured
+  isDelhiveryConfigured,
+  createWarehouse
 };

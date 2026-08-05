@@ -591,7 +591,7 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
     if (!order) return res.status(404).json({ error: "order_not_found" });
 
     const Customer = (await import("../models/Customer.js")).default;
-    const { createShipment, checkServiceability } = await import("../services/delhivery.service.js");
+    const { createShipment, checkServiceability, createWarehouse } = await import("../services/delhivery.service.js");
 
     const pickupLocationName = req.store.delhiveryPickupLocation || process.env.DELHIVERY_PICKUP_LOCATION || req.store.name || "Warehouse";
     let pickupPincode = req.store.pickupAddress?.pincode || process.env.DELHIVERY_PICKUP_PINCODE || "360001";
@@ -600,6 +600,19 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
     let pickupCity = req.store.pickupAddress?.city || process.env.DELHIVERY_PICKUP_CITY || "City";
     let pickupState = req.store.pickupAddress?.state || process.env.DELHIVERY_PICKUP_STATE || "State";
     let pickupPhone = req.store.pickupPhone || req.store.phone || process.env.DELHIVERY_PICKUP_PHONE || "9876543210";
+
+    try {
+      await createWarehouse({
+        name: pickupLocationName,
+        pin: pickupPincode,
+        phone: pickupPhone,
+        add: pickupAddressLine,
+        city: pickupCity,
+        state: pickupState
+      });
+    } catch (whErr) {
+      console.warn("Auto warehouse registration warning:", whErr.message);
+    }
 
     let addr = order.shippingAddress || {};
     if (!addr.pincode || !addr.line1) {
@@ -829,8 +842,8 @@ router.get("/orders/:id/delhivery/label/:waybill", protect, async (req, res) => 
     
     doc.end();
   } catch (err) {
-    console.error("Seller shiprocket label failed:", err.response?.data || err.message);
-    // Fallback to custom PDF if Shiprocket fails (simple shipping label only)
+    console.error("Seller delhivery label failed:", err.response?.data || err.message);
+    // Fallback to custom PDF if Delhivery fails (simple shipping label only)
     try {
       const order = await Order.findOne({ _id: req.params.id, store: req.store._id }).lean();
       const PDFDocument = (await import("pdfkit")).default;

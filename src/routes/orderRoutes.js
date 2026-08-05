@@ -129,7 +129,20 @@ const tryCreateDelhiveryShipment = async (order) => {
     const weightKg = Math.max(totalWeightGrams / 1000, 0.05);
     const cleanPhone = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
 
-    const { createShipment } = await import("../services/delhivery.service.js");
+    const { createShipment, createWarehouse } = await import("../services/delhivery.service.js");
+
+    try {
+      await createWarehouse({
+        name: pickupName,
+        pin: pickupPincode,
+        phone: pickupPhone,
+        add: pickupAddress,
+        city: pickupCity,
+        state: pickupState
+      });
+    } catch (whErr) {
+      console.warn("Auto warehouse registration warning in tryCreateDelhiveryShipment:", whErr.message);
+    }
 
     const shipmentData = {
       name: order.customer.name,
@@ -1097,7 +1110,7 @@ router.post("/:id/cancel", auth, requirePermission("orders"), async (req, res) =
     }
 
     // Also check if we have a waybill or shipment created
-    if (order.shipping?.waybill || order.shiprocketOrderId || order.shiprocketAwbNumber) {
+    if (order.shipping?.waybill || order.delhiveryOrderId || order.delhiveryAwbNumber || order.shiprocketOrderId || order.shiprocketAwbNumber) {
       return res.status(400).json({ error: "cannot_cancel_shipped_order" });
     }
     
@@ -1240,7 +1253,7 @@ router.post("/:id/cancel-customer", auth, requireRole("customer"), async (req, r
       return res.status(400).json({ error: "cannot_cancel_shipped_order" });
     }
 
-    if (order.shipping?.waybill || order.shiprocketOrderId || order.shiprocketAwbNumber) {
+    if (order.shipping?.waybill || order.delhiveryOrderId || order.delhiveryAwbNumber || order.shiprocketOrderId || order.shiprocketAwbNumber) {
       return res.status(400).json({ error: "cannot_cancel_shipped_order" });
     }
 
@@ -1474,11 +1487,11 @@ router.post("/:id/delhivery/standard-shipment", auth, requirePermission("orders"
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ error: "not_found" });
 
-    const updated = await tryCreateShiprocketShipment(order);
+    const updated = await tryCreateDelhiveryShipment(order);
     if (updated && updated.shipping?.waybill) {
       res.json({ success: true, waybill: updated.shipping.waybill });
     } else {
-      res.status(400).json({ error: "shipment_creation_failed", message: "Failed to create Shiprocket shipment. Please verify pincodes or configuration." });
+      res.status(400).json({ error: "shipment_creation_failed", message: "Failed to create Delhivery shipment. Please verify pincodes or configuration." });
     }
   } catch (err) {
     res.status(500).json({ error: "shipment_creation_failed", message: err.message });
