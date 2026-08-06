@@ -335,10 +335,20 @@ export const createShipment = async (shipmentData) => {
     }
     
     // Set pickup location
-    payload.pickup_location = String(payload.pickup_location || "").trim();
-    if (!payload.pickup_location) {
+    let pickupLocName = "";
+    if (typeof payload.pickup_location === 'object' && payload.pickup_location?.name) {
+      pickupLocName = String(payload.pickup_location.name).trim();
+    } else {
+      pickupLocName = String(payload.pickup_location || "").trim();
+    }
+
+    if (!pickupLocName) {
       throw new Error("Missing pickup_location");
     }
+
+    payload.pickup_location = {
+      name: pickupLocName
+    };
     
     console.log("FINAL DELHIVERY PAYLOAD", JSON.stringify(payload, null, 2));
     
