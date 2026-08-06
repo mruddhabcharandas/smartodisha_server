@@ -788,6 +788,12 @@ router.get("/orders/:id/delhivery/label/:waybill", protect, async (req, res) => 
     const { generateLabel } = await import("../services/delhivery.service.js");
     const labelResult = await generateLabel([waybill]);
 
+    // If Delhivery returns HTML packing slip/label, send it!
+    if (labelResult.format === "html" && labelResult.html) {
+      res.setHeader("Content-Type", "text/html");
+      return res.send(labelResult.html);
+    }
+
     // If Delhivery returns label, use it!
     if (labelResult.pdfBuffer || labelResult.pdfUrl) {
       if (labelResult.pdfBuffer) {

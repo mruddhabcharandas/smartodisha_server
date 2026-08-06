@@ -7,7 +7,13 @@ const router = express.Router();
 
 router.get("/", auth, requireRole("customer"), async (req, res) => {
   try {
-    const wishlist = await Wishlist.findOne({ customer: req.user.id }).populate("items.product");
+    const wishlist = await Wishlist.findOne({ customer: req.user.id }).populate({
+      path: "items.product",
+      populate: {
+        path: "store",
+        select: "storePercentage adminCutPercentage name"
+      }
+    });
     res.json(wishlist || { items: [] });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch wishlist" });
@@ -40,7 +46,13 @@ router.post("/add", auth, requireRole("customer"), async (req, res) => {
 
     wishlist.items.push({ product: productId });
     await wishlist.save();
-    await wishlist.populate("items.product");
+    await wishlist.populate({
+      path: "items.product",
+      populate: {
+        path: "store",
+        select: "storePercentage adminCutPercentage name"
+      }
+    });
 
     res.json({ message: "Product added to wishlist", wishlist });
   } catch (error) {
@@ -59,7 +71,13 @@ router.delete("/remove/:productId", auth, requireRole("customer"), async (req, r
 
     wishlist.items = wishlist.items.filter(item => item.product.toString() !== productId);
     await wishlist.save();
-    await wishlist.populate("items.product");
+    await wishlist.populate({
+      path: "items.product",
+      populate: {
+        path: "store",
+        select: "storePercentage adminCutPercentage name"
+      }
+    });
 
     res.json({ message: "Product removed from wishlist", wishlist });
   } catch (error) {

@@ -186,10 +186,6 @@ export const calculateShippingCost = async ({ origin, destination, weight, order
     let codCharge = 0;
     if (payment === 'cod') {
       codCharge = Math.min(Math.max(Math.round(orderAmt * 0.05), 40), 100);
-      // Only charge COD if COD is available
-      if (!codAvailable) {
-        codCharge = 0;
-      }
     }
     
     // Check if order amount exceeds COD limit
@@ -474,31 +470,39 @@ export const generateLabel = async (waybills) => {
     throw new Error("At least one waybill is required");
   }
   
-  const url = `${b}/api/p/packing-slip`;
-  console.log("Generating label for waybills:", waybillArray);
+  const wbns = waybillArray.join(",");
+  // Officially, Delhivery API uses /api/p/packing_slip (GET with wbns query param)
+  const url = `${b}/api/p/packing_slip?wbns=${wbns}`;
+  console.log("Generating Delhivery label via GET:", url);
   
   try {
     const res = await fetch(url, {
-      method: 'POST',
+      method: 'GET',
       headers: {
-        ...authHeader(),
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ waybills: waybillArray })
+        ...authHeader()
+      }
     });
     
     if (!res.ok) {
       throw new Error(`Delhivery label generation API error: ${res.status}`);
     }
     
-    const data = await res.json();
-    console.log("Label generation response:", data);
-    
-    return {
-      success: true,
-      waybills: waybillArray,
-      data: data
-    };
+    const contentType = res.headers.get("content-type") || "";
+    if (contentType.includes("html") || contentType.includes("text")) {
+      const htmlText = await res.text();
+      return {
+        success: true,
+        format: "html",
+        html: htmlText
+      };
+    } else {
+      const data = await res.json();
+      return {
+        success: true,
+        format: "json",
+        data: data
+      };
+    }
   } catch (err) {
     console.error("Error generating label:", err);
     throw err;

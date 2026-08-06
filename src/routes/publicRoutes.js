@@ -6,6 +6,7 @@ import Coupon from "../models/Coupon.js";
 import Bill from "../models/Bill.js";
 import PartnerPayout from "../models/PartnerPayout.js";
 import Partner from "../models/Partner.js";
+import HeroSlide from "../models/HeroSlide.js";
 import { sendOTP } from "../lib/mailer.js";
 import { getOrSetCache, getCacheVersion } from "../lib/redis.js";
 import { rateLimit } from "../middleware/rateLimit.js";
@@ -188,6 +189,15 @@ router.get("/partner/me", (await import("../middleware/auth.js")).auth, async (r
   }, 900); // 15 minutes
   
   res.json(summary);
+});
+
+router.get("/hero-slides", async (req, res) => {
+  try {
+    const slides = await HeroSlide.find({ isActive: true }).sort({ createdAt: -1 });
+    res.json(slides);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch hero slides" });
+  }
 });
 
 export default router;

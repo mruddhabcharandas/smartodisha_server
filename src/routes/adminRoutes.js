@@ -532,4 +532,62 @@ router.get("/revenue/product/:id/skus", auth, requireRole("admin"), async (req, 
   }
 });
 
+// Hero Slides Management
+router.get("/hero-slides", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const HeroSlide = (await import("../models/HeroSlide.js")).default;
+    const slides = await HeroSlide.find().sort({ createdAt: -1 });
+    res.json(slides);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch hero slides" });
+  }
+});
+
+router.post("/hero-slides", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const { title, link, image } = req.body || {};
+    if (!image || !image.url || !image.publicId) {
+      return res.status(400).json({ error: "Image details (url, publicId) are required" });
+    }
+    const HeroSlide = (await import("../models/HeroSlide.js")).default;
+    const slide = await HeroSlide.create({
+      title: title || "",
+      link: link || "",
+      image: {
+        url: image.url,
+        publicId: image.publicId
+      }
+    });
+    res.status(201).json(slide);
+  } catch (err) {
+    console.error("Create hero slide failed:", err);
+    res.status(500).json({ error: "Failed to create hero slide" });
+  }
+});
+
+router.delete("/hero-slides/:id", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const HeroSlide = (await import("../models/HeroSlide.js")).default;
+    const { deleteFromCloudinary } = await import("../lib/cloudinary.js");
+
+    const slide = await HeroSlide.findById(req.params.id);
+    if (!slide) return res.status(404).json({ error: "Hero slide not found" });
+
+    if (slide.image?.publicId) {
+      try {
+        await deleteFromCloudinary(slide.image.publicId);
+        console.log("Deleted slide from Cloudinary:", slide.image.publicId);
+      } catch (cloudinaryErr) {
+        console.error("Failed to delete slide from Cloudinary:", cloudinaryErr);
+      }
+    }
+
+    await HeroSlide.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: "Hero slide deleted successfully" });
+  } catch (err) {
+    console.error("Delete hero slide failed:", err);
+    res.status(500).json({ error: "Failed to delete hero slide" });
+  }
+});
+
 export default router;

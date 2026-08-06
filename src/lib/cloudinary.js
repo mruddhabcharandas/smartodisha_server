@@ -27,3 +27,14 @@ export const uploadBuffer = async (buffer, folder='products') => {
   return { url: res.secure_url, publicId: res.public_id }
 }
 
+export const deleteFromCloudinary = async (publicId) => {
+  if (!process.env.CLOUDINARY_CLOUD_NAME) return;
+  configureCloudinary();
+  return new Promise((resolve, reject) => {
+    cloudinary.uploader.destroy(publicId, (err, result) => {
+      if (err) return reject(err);
+      resolve(result);
+    });
+  });
+};
+
