@@ -18,10 +18,55 @@ import { createBillFromData } from "../lib/billing.js";
 import { sendEmail, renderMail } from "../lib/mailer.js";
 import AuditLog from "../models/AuditLog.js";
 import { notifyAdmin } from "../lib/socket.js";
+import SellerTransaction from "../models/SellerTransaction.js";
 
 import { getStoreShippingConfig, calculateShippingCost } from "../lib/shipping.js";
 
 const router = express.Router();
+
+export const creditSellerWalletForOrder = async (orderId) => {
+  try {
+    const order = await Order.findById(orderId).populate("items.product");
+    if (!order) return;
+
+    // Check if already credited
+    const existingTx = await SellerTransaction.findOne({ order: orderId, type: "EARNING" });
+    if (existingTx) {
+      console.log(`Order ${orderId} already credited to seller wallet.`);
+      return;
+    }
+
+    // Group items by store
+    const storeEarnings = {};
+    for (const item of order.items) {
+      const storeId = item.product?.store?.toString();
+      if (!storeId) continue;
+      const itemEarnings = (item.price || 0) * (item.quantity || 1);
+      storeEarnings[storeId] = (storeEarnings[storeId] || 0) + itemEarnings;
+    }
+
+    // Credit each store
+    for (const storeId of Object.keys(storeEarnings)) {
+      const amount = storeEarnings[storeId];
+      if (amount <= 0) continue;
+
+      await Store.findByIdAndUpdate(storeId, {
+        $inc: { walletPending: amount }
+      });
+
+      await SellerTransaction.create({
+        store: storeId,
+        type: "EARNING",
+        amount,
+        order: orderId,
+        note: `Earnings from Order #${orderId.toString().slice(-6).toUpperCase()}`
+      });
+      console.log(`Credited ₹${amount} to store ${storeId} for order ${orderId}`);
+    }
+  } catch (err) {
+    console.error("Failed to credit seller wallet for order:", err);
+  }
+};
 
 const _sanitize = (s) => String(s || "").trim().replace(/^['"`]+|['"`]+$/g, "").replace(/\/+$/, "");
 
@@ -1372,6 +1417,9 @@ router.patch("/:id/status", auth, requirePermission("orders"), async (req, res) 
       } catch (err) {}
     }
     await order.save();
+    if (["DELIVERED", "FULFILLED"].includes(req.body.status)) {
+      await creditSellerWalletForOrder(order._id);
+    }
     
     await AuditLog.create({
       actorId: req.user.id,
@@ -1423,6 +1471,7 @@ router.patch("/:id/deliver", auth, requirePermission("orders"), async (req, res)
     order.status = "DELIVERED";
     order.paymentStatus = "PAID";
     await order.save();
+    await creditSellerWalletForOrder(order._id);
 
     try {
       await createBillFromData({
@@ -1458,6 +1507,7 @@ router.patch("/:id/finalize-cod", auth, requirePermission("orders"), async (req,
     order.paymentStatus = "PAID";
     order.status = "DELIVERED";
     await order.save();
+    await creditSellerWalletForOrder(order._id);
 
     try {
       await createBillFromData({

@@ -850,13 +850,13 @@ router.get("/orders/:id/delhivery/label/:waybill", protect, async (req, res) => 
       const PDFDocument = (await import("pdfkit")).default;
       const doc = new PDFDocument({ margin: 24, size: "A6" });
       res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `inline; filename=label_${awb}.pdf`);
+      res.setHeader("Content-Disposition", `inline; filename=label_${waybill}.pdf`);
       doc.pipe(res);
       
       doc.fontSize(18).text("SHIPPING LABEL", { align: "center", underline: true });
       doc.moveDown(0.5);
-      if (awb) {
-        doc.fontSize(14).text(`AWB: ${awb}`, { align: "center" });
+      if (waybill) {
+        doc.fontSize(14).text(`AWB: ${waybill}`, { align: "center" });
         doc.moveDown(0.5);
       }
 
@@ -1608,6 +1608,28 @@ router.post("/brands", protect, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to create brand" });
+  }
+});
+
+router.get("/wallet", protect, async (req, res) => {
+  try {
+    const store = await Store.findById(req.store._id, "walletPending walletPaid");
+    if (!store) return res.status(404).json({ error: "store_not_found" });
+
+    const SellerTransaction = (await import("../models/SellerTransaction.js")).default;
+    const transactions = await SellerTransaction.find({ store: req.store._id })
+      .populate("order", "_id totalEstimate customer")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.json({
+      walletPending: store.walletPending || 0,
+      walletPaid: store.walletPaid || 0,
+      transactions
+    });
+  } catch (err) {
+    console.error("Seller wallet fetch failed:", err);
+    res.status(500).json({ error: "wallet_fetch_failed", message: err.message });
   }
 });
 

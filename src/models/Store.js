@@ -44,7 +44,9 @@ const storeSchema = new mongoose.Schema(
     pickupPhone: { type: String, default: "" },
     delhiveryPickupLocation: { type: String, default: "" },
     shiprocketEmail: { type: String, default: "" },
-    shiprocketPassword: { type: String, default: "" }
+    shiprocketPassword: { type: String, default: "" },
+    walletPending: { type: Number, default: 0 },
+    walletPaid: { type: Number, default: 0 }
   },
   { timestamps: true }
 );
