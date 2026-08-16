@@ -590,4 +590,150 @@ router.delete("/hero-slides/:id", auth, requireRole("admin"), async (req, res) =
   }
 });
 
+// Get all store requests
+router.get("/store-requests", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const StoreRequest = (await import("../models/StoreRequest.js")).default;
+    const requests = await StoreRequest.find().sort({ createdAt: -1 });
+    res.json(requests);
+  } catch (err) {
+    console.error("Failed to fetch store requests:", err);
+    res.status(500).json({ error: "Failed to fetch store requests" });
+  }
+});
+
+// Reject a store request
+router.post("/store-requests/:id/reject", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const StoreRequest = (await import("../models/StoreRequest.js")).default;
+    const request = await StoreRequest.findById(req.params.id);
+    if (!request) return res.status(404).json({ error: "Request not found" });
+    
+    request.status = "rejected";
+    await request.save();
+    res.json({ message: "Request rejected successfully", request });
+  } catch (err) {
+    console.error("Failed to reject request:", err);
+    res.status(500).json({ error: "Failed to reject request" });
+  }
+});
+
+// Approve a store request
+router.post("/store-requests/:id/approve", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const crypto = await import("crypto");
+    const StoreRequest = (await import("../models/StoreRequest.js")).default;
+    const { sendEmail } = await import("../lib/mailer.js");
+
+    const request = await StoreRequest.findById(req.params.id);
+    if (!request) return res.status(404).json({ error: "Request not found" });
+
+    // Check if store with this email already exists
+    const existingStore = await Store.findOne({ email: request.email });
+    if (existingStore) {
+      return res.status(400).json({ error: "Store with this email already exists" });
+    }
+
+    // Generate random 10-char password
+    const plainPassword = crypto.randomBytes(5).toString("hex");
+
+    // Create store
+    const store = await Store.create({
+      name: request.businessName,
+      email: request.email,
+      phone: request.phone,
+      password: plainPassword,
+      address: request.address,
+      isActive: true
+    });
+
+    // Mark request as approved
+    request.status = "approved";
+    await request.save();
+
+    // Send email with credentials
+    const subject = `Your Store has been approved - ${process.env.COMPANY_NAME || "SmartOdisha"}`;
+    const html = `
+      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;max-width:600px;margin:20px auto;padding:40px;border:1px solid #f1f5f9;border-radius:24px;background:#ffffff;box-shadow:0 20px 40px rgba(0,0,0,0.03)">
+        <div style="text-align:center;margin-bottom:32px">
+          <img src="${process.env.LOGO_URL || 'https://smartodisha.in/logo.png'}" alt="SmartOdisha" style="height:50px;margin-bottom:16px;">
+          <br>
+          <div style="font-size:12px;letter-spacing:.3em;color:#7c3aed;background:#f5f3ff;border:1px solid #e9d5ff;display:inline-block;padding:8px 20px;border-radius:100px;font-weight:900;text-transform:uppercase">${process.env.COMPANY_NAME || "SmartOdisha"}</div>
+        </div>
+        <h1 style="color:#0f172a;margin:0 0 20px;font-weight:900;font-size:28px;text-align:center">Congratulations, ${request.name}!</h1>
+        <p style="color:#64748b;line-height:1.6;font-size:16px;margin-bottom:24px">
+          Your store request has been approved and is now live on <strong>SmartOdisha</strong>. We are thrilled to have you on board!
+        </p>
+        <div style="background:#f8fafc;padding:24px;border-radius:16px;border:1px solid #f1f5f9;margin-bottom:32px">
+          <h3 style="color:#0f172a;margin-top:0">Login Credentials:</h3>
+          <p style="color:#475569;margin:8px 0;"><strong>Email:</strong> ${request.email}</p>
+          <p style="color:#475569;margin:8px 0;"><strong>Temporary Password:</strong> ${plainPassword}</p>
+        </div>
+        <div style="text-align:center">
+          <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/business/login" style="background:#7c3aed;color:#ffffff;padding:16px 32px;border-radius:12px;text-decoration:none;font-weight:800;display:inline-block;box-shadow:0 8px 16px rgba(124,58,237,0.2)">Go to Seller Login</a>
+        </div>
+      </div>
+    `;
+    
+    try {
+      await sendEmail({ to: request.email, subject, html });
+    } catch (mailErr) {
+      console.error("Failed to send approval email:", mailErr);
+    }
+
+    // Invalidate store cache
+    await bumpCacheVersion("stores");
+    await delCache("stores:all:*");
+
+    res.json({ message: "Request approved and store created", store, request });
+  } catch (err) {
+    console.error("Failed to approve request:", err);
+    res.status(500).json({ error: err.message || "Failed to approve request" });
+  }
+});
+
+// Delete a store request
+router.delete("/store-requests/:id", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const StoreRequest = (await import("../models/StoreRequest.js")).default;
+    const request = await StoreRequest.findById(req.params.id);
+    if (!request) return res.status(404).json({ error: "Request not found" });
+
+    await StoreRequest.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: "Request deleted successfully" });
+  } catch (err) {
+    console.error("Failed to delete request:", err);
+    res.status(500).json({ error: "Failed to delete request" });
+  }
+});
+
+// Change Admin/Staff Password
+router.put("/change-password", auth, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: "Current password and new password are required" });
+    }
+
+    const Admin = (await import("../models/Admin.js")).default;
+    const adminUser = await Admin.findById(req.admin._id);
+    if (!adminUser) return res.status(404).json({ error: "Admin/Staff user not found" });
+
+    // Validate current password
+    const isMatch = await adminUser.comparePassword(currentPassword);
+    if (!isMatch) {
+      return res.status(401).json({ error: "Invalid current password" });
+    }
+
+    // Set new password (the schema will hash it on save)
+    adminUser.password = newPassword;
+    await adminUser.save();
+
+    res.json({ message: "Password updated successfully" });
+  } catch (err) {
+    console.error("Admin password change failed:", err);
+    res.status(500).json({ error: "Failed to update password" });
+  }
+});
+
 export default router;
