@@ -9,7 +9,7 @@ const router = express.Router();
 // Get all store payout details (Admin only)
 router.get("/", auth, requirePermission("orders"), async (req, res) => {
   try {
-    const stores = await Store.find({}, "name image email phone walletPending walletPaid createdAt").lean();
+    const stores = await Store.find({}, "name image email phone walletPending walletPaid bankDetails upiId createdAt").lean();
     res.json(stores);
   } catch (err) {
     console.error("Get payouts failed:", err);

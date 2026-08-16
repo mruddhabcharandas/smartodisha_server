@@ -46,7 +46,14 @@ const storeSchema = new mongoose.Schema(
     shiprocketEmail: { type: String, default: "" },
     shiprocketPassword: { type: String, default: "" },
     walletPending: { type: Number, default: 0 },
-    walletPaid: { type: Number, default: 0 }
+    walletPaid: { type: Number, default: 0 },
+    bankDetails: {
+      accountName: { type: String, default: "" },
+      accountNumber: { type: String, default: "" },
+      ifscCode: { type: String, default: "" },
+      bankName: { type: String, default: "" }
+    },
+    upiId: { type: String, default: "" }
   },
   { timestamps: true }
 );

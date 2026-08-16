@@ -279,7 +279,7 @@ router.post("/change-password", protect, async (req, res) => {
 // Update store profile
 router.put("/profile", protect, async (req, res) => {
   try {
-    const { name, phone, address, gstNumber, pickupAddress, pickupName, pickupPhone, delhiveryPickupLocation, shiprocketEmail, shiprocketPassword, image, sellerAvatar, currentPassword } = req.body;
+    const { name, phone, address, gstNumber, pickupAddress, pickupName, pickupPhone, delhiveryPickupLocation, shiprocketEmail, shiprocketPassword, image, sellerAvatar, currentPassword, bankDetails, upiId } = req.body;
     const store = await Store.findById(req.store._id);
 
     // Check if pickup details are being changed
@@ -310,6 +310,8 @@ router.put("/profile", protect, async (req, res) => {
       store.delhiveryPickupLocation = delhiveryPickupLocation !== undefined ? delhiveryPickupLocation : store.delhiveryPickupLocation;
       store.shiprocketEmail = shiprocketEmail || store.shiprocketEmail;
       store.shiprocketPassword = shiprocketPassword || store.shiprocketPassword;
+      if (bankDetails !== undefined) store.bankDetails = bankDetails;
+      if (upiId !== undefined) store.upiId = upiId;
       
       // Update image if provided
       if (image) {
@@ -706,8 +708,8 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
             return_phone: sanitize(pickupPhone),
             products_desc: sanitize(orderItems.map(i => i.name).join(", ")),
             order_date: new Date().toISOString().split("T")[0],
-            // Use product total + shipping cost, not the full totalEstimate that includes COD surcharge
-            total_amount: Number((order.productTotal || 0) + (order.shippingCost || 0)),
+            // Use the actual totalEstimate (includes shipping, COD fees, and applies coupon discount)
+            total_amount: Number(order.totalEstimate || 0),
             seller_name: sanitize(pickupName),
             seller_add: sanitize(pickupAddressLine),
             seller_city: sanitize(pickupCity),
@@ -737,13 +739,8 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
     };
 
     if (order.paymentMethod === "COD") {
-      const productTotal = Number(order.productTotal || 0);
-      const shippingCharge = Number(order.shippingCost || 0);
-      const totalAmount = productTotal + shippingCharge;
-      const advanceAmount = Math.ceil(totalAmount * 0.15);
-      const codDueAmount = Number((totalAmount - advanceAmount).toFixed(2));
-      shipmentData.data.shipments[0].cod_amount = codDueAmount;
-      shipmentData.data.shipments[0].total_amount = totalAmount;
+      shipmentData.data.shipments[0].cod_amount = Number(order.codDueAmount || 0);
+      shipmentData.data.shipments[0].total_amount = Number(order.totalEstimate || 0);
     }
 
     console.log("Sending to Delhivery:", JSON.stringify(shipmentData, null, 2));
