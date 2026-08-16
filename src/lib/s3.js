@@ -1,7 +1,13 @@
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import crypto from "crypto";
 import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 
 const s3Client = new S3Client({
   region: "ap-south-1",
@@ -62,3 +68,34 @@ export const getPresignedUrl = async (key, expiresIn = 3600) => {
   
   return await getSignedUrl(s3Client, command, { expiresIn });
 };
+
+export const deleteFile = async (key) => {
+  if (!key) return;
+
+  // Try local first
+  const localPath = path.resolve(__dirname, "../../public", key);
+  if (fs.existsSync(localPath)) {
+    try {
+      fs.unlinkSync(localPath);
+      console.log(`Deleted local file: ${localPath}`);
+      return;
+    } catch (err) {
+      console.error(`Failed to delete local file ${localPath}:`, err);
+    }
+  }
+
+  // Try S3
+  if (process.env.AWS_S3_BUCKET_NAME) {
+    try {
+      const command = new DeleteObjectCommand({
+        Bucket: process.env.AWS_S3_BUCKET_NAME,
+        Key: key
+      });
+      await s3Client.send(command);
+      console.log(`Deleted S3 object: key=${key}`);
+    } catch (err) {
+      console.error(`Failed to delete S3 object key=${key}:`, err);
+    }
+  }
+};
+

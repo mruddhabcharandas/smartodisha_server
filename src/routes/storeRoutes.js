@@ -283,11 +283,24 @@ router.put("/profile", protect, async (req, res) => {
     const store = await Store.findById(req.store._id);
 
     // Check if pickup details are being changed
+    const cleanStr = (val) => String(val || "").trim();
+    
+    const isAddressDiff = () => {
+      if (!pickupAddress) return false;
+      const fields = ["line1", "line2", "city", "state", "pincode"];
+      for (const f of fields) {
+        if (cleanStr(pickupAddress[f]) !== cleanStr(store.pickupAddress?.[f])) {
+          return true;
+        }
+      }
+      return false;
+    };
+
     const isPickupChanged = 
-      (pickupAddress && JSON.stringify(pickupAddress) !== JSON.stringify(store.pickupAddress)) ||
-      (pickupName && pickupName !== store.pickupName) ||
-      (pickupPhone && pickupPhone !== store.pickupPhone) ||
-      (delhiveryPickupLocation !== undefined && delhiveryPickupLocation !== store.delhiveryPickupLocation);
+      isAddressDiff() ||
+      (pickupName !== undefined && cleanStr(pickupName) !== cleanStr(store.pickupName)) ||
+      (pickupPhone !== undefined && cleanStr(pickupPhone) !== cleanStr(store.pickupPhone)) ||
+      (delhiveryPickupLocation !== undefined && cleanStr(delhiveryPickupLocation) !== cleanStr(store.delhiveryPickupLocation));
 
     if (isPickupChanged) {
       if (!currentPassword) {

@@ -568,17 +568,17 @@ router.post("/hero-slides", auth, requireRole("admin"), async (req, res) => {
 router.delete("/hero-slides/:id", auth, requireRole("admin"), async (req, res) => {
   try {
     const HeroSlide = (await import("../models/HeroSlide.js")).default;
-    const { deleteFromCloudinary } = await import("../lib/cloudinary.js");
+    const { deleteFile } = await import("../lib/s3.js");
 
     const slide = await HeroSlide.findById(req.params.id);
     if (!slide) return res.status(404).json({ error: "Hero slide not found" });
 
     if (slide.image?.publicId) {
       try {
-        await deleteFromCloudinary(slide.image.publicId);
-        console.log("Deleted slide from Cloudinary:", slide.image.publicId);
-      } catch (cloudinaryErr) {
-        console.error("Failed to delete slide from Cloudinary:", cloudinaryErr);
+        await deleteFile(slide.image.publicId);
+        console.log("Deleted slide image from storage:", slide.image.publicId);
+      } catch (storageErr) {
+        console.error("Failed to delete slide from storage:", storageErr);
       }
     }
 
