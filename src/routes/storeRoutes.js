@@ -804,15 +804,18 @@ router.get("/orders/:id/delhivery/label/:waybill", protect, async (req, res) => 
       return res.send(labelResult.html);
     }
 
+    // Extract PDF URL if returned as JSON data from Delhivery
+    const pdfUrl = labelResult.pdfUrl || labelResult.pdf_url || labelResult.data?.pdf_url || labelResult.data?.packages?.[0]?.pdf_url;
+
     // If Delhivery returns label, use it!
-    if (labelResult.pdfBuffer || labelResult.pdfUrl) {
+    if (labelResult.pdfBuffer || pdfUrl) {
       if (labelResult.pdfBuffer) {
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `inline; filename=label_${waybill}.pdf`);
         return res.send(labelResult.pdfBuffer);
       } else {
         const axios = await import("axios");
-        const pdfResponse = await axios.default.get(labelResult.pdfUrl, { responseType: "arraybuffer" });
+        const pdfResponse = await axios.default.get(pdfUrl, { responseType: "arraybuffer" });
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `inline; filename=label_${waybill}.pdf`);
         return res.send(Buffer.from(pdfResponse.data));
