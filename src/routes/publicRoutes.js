@@ -193,7 +193,7 @@ router.get("/partner/me", (await import("../middleware/auth.js")).auth, async (r
 
 router.get("/hero-slides", async (req, res) => {
   try {
-    const slides = await HeroSlide.find({ isActive: true }).sort({ createdAt: -1 });
+    const slides = await HeroSlide.find({ isActive: { $ne: false } }).sort({ createdAt: -1 });
     res.json(slides);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch hero slides" });

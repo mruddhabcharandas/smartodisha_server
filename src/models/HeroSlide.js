@@ -13,4 +13,4 @@ const heroSlideSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-export default mongoose.model("HeroSlide", heroSlideSchema);
+export default mongoose.models.HeroSlide || mongoose.model("HeroSlide", heroSlideSchema);
