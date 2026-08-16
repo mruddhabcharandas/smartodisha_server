@@ -716,7 +716,7 @@ router.put("/change-password", auth, async (req, res) => {
     }
 
     const Admin = (await import("../models/Admin.js")).default;
-    const adminUser = await Admin.findById(req.admin._id);
+    const adminUser = await Admin.findById(req.user.id);
     if (!adminUser) return res.status(404).json({ error: "Admin/Staff user not found" });
 
     // Validate current password
