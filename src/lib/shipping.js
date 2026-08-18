@@ -42,7 +42,8 @@ export const calculateShippingCost = async ({
   totalWeightGrams,
   orderAmount,
   paymentMethod, // "CASHFREE" or "COD"
-  products // array of products with dimensions
+  products, // array of products with dimensions
+  freeDeliveryAbove
 }) => {
   let actualWeightKg = totalWeightGrams > 0 ? totalWeightGrams / 1000 : 0.5;
   let volumetricWeightKg = 0;
@@ -68,6 +69,7 @@ export const calculateShippingCost = async ({
     destination: dest,
     weight: weightKg,
     orderAmount,
-    paymentMethod: pm
+    paymentMethod: pm,
+    freeDeliveryAbove
   });
 };

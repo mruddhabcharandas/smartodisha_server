@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import Order from "../models/Order.js";
 import Store from "../models/Store.js";
 import Product from "../models/Product.js";
+import SystemSetting from "../models/SystemSetting.js";
 import { auth, requireRole, requirePermission } from "../middleware/auth.js";
 import PDFDocument from "pdfkit";
 import { getStoreShippingConfig, calculateShippingCost } from "../lib/shipping.js";
@@ -86,13 +87,17 @@ router.post("/calculate", async (req, res) => {
   const products = req.body.products || [];
 
   try {
+    const settings = await SystemSetting.findOne();
+    const freeDeliveryAbove = settings?.freeDeliveryAbove ?? Number(process.env.FREE_DELIVERY_ABOVE || 999);
+
     const shippingInfo = await calculateShippingCost({
       origin,
       dest,
       totalWeightGrams: weightGrams,
       orderAmount,
       paymentMethod: pm,
-      products
+      products,
+      freeDeliveryAbove
     });
 
     res.json({
@@ -107,20 +112,24 @@ router.post("/calculate", async (req, res) => {
       label: shippingInfo.finalCharge === 0 && paymentMethod === 'prepaid' ? "FREE DELIVERY" : `₹${shippingInfo.finalCharge} Delivery`,
       delivery_charge: shippingInfo.deliveryCharge,
       final_charge: shippingInfo.finalCharge,
-      free_delivery_above: Number(process.env.FREE_DELIVERY_ABOVE || 999),
+      free_delivery_above: freeDeliveryAbove,
       cod_available: shippingInfo.codAvailable,
       cod_charge: shippingInfo.codCharge,
       selected_courier: shippingInfo.selectedCourier
     });
   } catch (error) {
     console.error("Shipping calculation failed:", error);
+    const settings = await SystemSetting.findOne();
+    const freeDeliveryAbove = settings?.freeDeliveryAbove ?? Number(process.env.FREE_DELIVERY_ABOVE || 999);
+
     const fallbackShippingInfo = await calculateShippingCost({
       origin,
       dest: null,
       totalWeightGrams: weightGrams,
       orderAmount,
       paymentMethod: pm,
-      products
+      products,
+      freeDeliveryAbove
     });
 
     res.json({
@@ -135,7 +144,7 @@ router.post("/calculate", async (req, res) => {
       label: fallbackShippingInfo.finalCharge === 0 && paymentMethod === 'prepaid' ? "FREE DELIVERY" : `₹${fallbackShippingInfo.finalCharge} Delivery`,
       delivery_charge: fallbackShippingInfo.deliveryCharge,
       final_charge: fallbackShippingInfo.finalCharge,
-      free_delivery_above: Number(process.env.FREE_DELIVERY_ABOVE || 999),
+      free_delivery_above: freeDeliveryAbove,
       cod_available: fallbackShippingInfo.codAvailable,
       cod_charge: fallbackShippingInfo.codCharge,
       selected_courier: fallbackShippingInfo.selectedCourier

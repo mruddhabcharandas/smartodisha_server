@@ -7,6 +7,7 @@ import Product from "../models/Product.js";
 import Customer from "../models/Customer.js";
 import Coupon from "../models/Coupon.js";
 import Store from "../models/Store.js";
+import SystemSetting from "../models/SystemSetting.js";
 import { auth, requireRole, requirePermission } from "../middleware/auth.js";
 import StockTxn from "../models/StockTxn.js";
 import Bill from "../models/Bill.js";
@@ -635,6 +636,9 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
       const dest = deliveryAddress?.pincode || (cust.savedAddresses || []).find(a => a.isDefault)?.pincode || cust.kyc?.pincode;
       const orderAmount = payableProductTotal; // Use final product total after coupon
       
+      const settings = await SystemSetting.findOne();
+      const freeDeliveryAbove = settings?.freeDeliveryAbove ?? Number(process.env.FREE_DELIVERY_ABOVE || 999);
+
       const shippingInfo = await calculateShippingCost({
         origin,
         dest,
@@ -642,14 +646,16 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
         orderAmount,
         paymentMethod,
         srEmail,
-        srPassword
+        srPassword,
+        freeDeliveryAbove
       });
       
       shippingCost = shippingInfo.deliveryCharge;
       codCharge = shippingInfo.codCharge;
     } catch (e) {
       console.error("Shipping calculation failed, using default:", e.message);
-      const freeDeliveryAbove = Number(process.env.FREE_DELIVERY_ABOVE || 999);
+      const settings = await SystemSetting.findOne();
+      const freeDeliveryAbove = settings?.freeDeliveryAbove ?? Number(process.env.FREE_DELIVERY_ABOVE || 999);
       const isPrepaidFree = totals.total >= freeDeliveryAbove && paymentMethod === 'CASHFREE';
       shippingCost = isPrepaidFree ? 0 : 85;
       if (paymentMethod === "COD") {

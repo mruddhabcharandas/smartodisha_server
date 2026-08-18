@@ -200,4 +200,16 @@ router.get("/hero-slides", async (req, res) => {
   }
 });
 
+router.get("/settings", async (req, res) => {
+  try {
+    const SystemSetting = (await import("../models/SystemSetting.js")).default;
+    const settings = await SystemSetting.findOne();
+    res.json({
+      freeDeliveryAbove: settings?.freeDeliveryAbove ?? Number(process.env.FREE_DELIVERY_ABOVE || 999)
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch settings" });
+  }
+});
+
 export default router;

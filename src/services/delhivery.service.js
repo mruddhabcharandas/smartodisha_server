@@ -150,7 +150,7 @@ const getFallbackServiceability = (pincode, available = true) => ({
 /**
  * Calculate shipping cost
  */
-export const calculateShippingCost = async ({ origin, destination, weight, orderAmount, paymentMethod }) => {
+export const calculateShippingCost = async ({ origin, destination, weight, orderAmount, paymentMethod, freeDeliveryAbove }) => {
   try {
     // Validate inputs
     const weightKg = Math.max(DEFAULT_WEIGHT, parseFloat(weight) || DEFAULT_WEIGHT);
@@ -160,7 +160,7 @@ export const calculateShippingCost = async ({ origin, destination, weight, order
     // Get configuration
     const baseRate = parseFloat(process.env.DELHIVERY_BASE_RATE) || DEFAULT_BASE_RATE;
     const perKgRate = parseFloat(process.env.DELHIVERY_PER_KG_RATE) || DEFAULT_PER_KG_RATE;
-    const freeDeliveryAbove = parseFloat(process.env.FREE_DELIVERY_ABOVE) || DEFAULT_FREE_DELIVERY_ABOVE;
+    const freeDeliveryAboveVal = typeof freeDeliveryAbove === 'number' ? freeDeliveryAbove : (parseFloat(process.env.FREE_DELIVERY_ABOVE) || DEFAULT_FREE_DELIVERY_ABOVE);
     const codMaxLimit = parseFloat(process.env.COD_MAX_LIMIT) || DEFAULT_COD_MAX_LIMIT;
     
     // Check if COD is available for this pincode (if destination provided)
@@ -179,7 +179,7 @@ export const calculateShippingCost = async ({ origin, destination, weight, order
     shippingCharge = Math.max(0, shippingCharge); // Ensure non-negative
     
     // Free delivery if order amount exceeds threshold
-    const isFreeDelivery = payment !== 'cod' && orderAmt >= freeDeliveryAbove;
+    const isFreeDelivery = payment !== 'cod' && orderAmt >= freeDeliveryAboveVal;
     const finalDeliveryCharge = isFreeDelivery ? 0 : shippingCharge;
     
     // COD charge: 5% or min ₹40, max ₹100
@@ -205,14 +205,14 @@ export const calculateShippingCost = async ({ origin, destination, weight, order
     };
   } catch (error) {
     console.error("Delhivery shipping calculation failed, using fallback:", error);
-    return getFallbackShippingCost({ weight, orderAmount, paymentMethod });
+    return getFallbackShippingCost({ weight, orderAmount, paymentMethod, freeDeliveryAbove });
   }
 };
 
 /**
  * Get fallback shipping cost
  */
-const getFallbackShippingCost = ({ weight, orderAmount, paymentMethod }) => {
+const getFallbackShippingCost = ({ weight, orderAmount, paymentMethod, freeDeliveryAbove }) => {
   const weightKg = Math.max(DEFAULT_WEIGHT, parseFloat(weight) || DEFAULT_WEIGHT);
   const orderAmt = parseFloat(orderAmount) || 0;
   const payment = String(paymentMethod || "").toLowerCase();
@@ -220,12 +220,12 @@ const getFallbackShippingCost = ({ weight, orderAmount, paymentMethod }) => {
   const baseRate = parseFloat(process.env.SHIPPING_BASE_CHARGE) || DEFAULT_BASE_RATE;
   const perKgRate = parseFloat(process.env.SHIPPING_PER_KG_CHARGE) || DEFAULT_PER_KG_RATE;
   const minCharge = parseFloat(process.env.SHIPPING_MIN_CHARGE) || DEFAULT_BASE_RATE;
-  const freeDeliveryAbove = parseFloat(process.env.FREE_DELIVERY_ABOVE) || DEFAULT_FREE_DELIVERY_ABOVE;
+  const freeDeliveryAboveVal = typeof freeDeliveryAbove === 'number' ? freeDeliveryAbove : (parseFloat(process.env.FREE_DELIVERY_ABOVE) || DEFAULT_FREE_DELIVERY_ABOVE);
   const codMaxLimit = parseFloat(process.env.COD_MAX_LIMIT) || DEFAULT_COD_MAX_LIMIT;
   
   let shippingCharge = Math.max(minCharge, baseRate + (perKgRate * (weightKg - DEFAULT_WEIGHT)));
   
-  const isFreeDelivery = payment !== 'cod' && orderAmt >= freeDeliveryAbove;
+  const isFreeDelivery = payment !== 'cod' && orderAmt >= freeDeliveryAboveVal;
   const finalDeliveryCharge = isFreeDelivery ? 0 : shippingCharge;
   
   const codCharge = payment === 'cod' 

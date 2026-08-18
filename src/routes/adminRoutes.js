@@ -9,6 +9,7 @@ import { sendEmail } from "../lib/mailer.js";
 import { bumpCacheVersion, delCache } from "../lib/redis.js";
 
 import Admin from "../models/Admin.js";
+import SystemSetting from "../models/SystemSetting.js";
 
 const router = express.Router();
 
@@ -325,15 +326,45 @@ router.get("/stats", auth, async (req, res) => {
   });
 });
 
-router.get("/settings", auth, requireRole("admin"), (req, res) => {
-  res.json({
-    companyName: process.env.COMPANY_NAME || "Click2Kart",
-    companyGst: process.env.COMPANY_GST || "",
-    companyAddress: process.env.COMPANY_ADDRESS || "",
-    companyPhone: process.env.COMPANY_PHONE || "",
-    companyEmail: process.env.COMPANY_EMAIL || "",
-    lowStockThreshold: Number(process.env.LOW_STOCK_THRESHOLD ?? 5)
-  });
+router.get("/settings", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const settings = await SystemSetting.findOne();
+    res.json({
+      companyName: process.env.COMPANY_NAME || "Click2Kart",
+      companyGst: process.env.COMPANY_GST || "",
+      companyAddress: process.env.COMPANY_ADDRESS || "",
+      companyPhone: process.env.COMPANY_PHONE || "",
+      companyEmail: process.env.COMPANY_EMAIL || "",
+      lowStockThreshold: Number(process.env.LOW_STOCK_THRESHOLD ?? 5),
+      freeDeliveryAbove: settings?.freeDeliveryAbove ?? Number(process.env.FREE_DELIVERY_ABOVE || 999)
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch settings" });
+  }
+});
+
+router.put("/settings", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const { freeDeliveryAbove } = req.body;
+    if (freeDeliveryAbove === undefined || isNaN(Number(freeDeliveryAbove))) {
+      return res.status(400).json({ error: "Invalid freeDeliveryAbove value" });
+    }
+
+    let settings = await SystemSetting.findOne();
+    if (!settings) {
+      settings = new SystemSetting();
+    }
+
+    settings.freeDeliveryAbove = Number(freeDeliveryAbove);
+    await settings.save();
+
+    res.json({
+      success: true,
+      freeDeliveryAbove: settings.freeDeliveryAbove
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || "Failed to update settings" });
+  }
 });
 
 router.get("/customers", auth, requirePermission("customers"), async (req, res) => {
