@@ -82,7 +82,7 @@ orderSchema.pre('save', async function (next) {
       
       // Find the last order with the same year and month prefix
       const lastOrder = await this.constructor.findOne(
-        { orderNumber: { $regex: `^CK${year}${month}` } },
+        { orderNumber: { $regex: `^OD${year}${month}` } },
         { orderNumber: 1 },
         { sort: { orderNumber: -1 } }
       );
@@ -93,11 +93,11 @@ orderSchema.pre('save', async function (next) {
         sequence = lastSequence + 1;
       }
       
-      this.orderNumber = `CK${year}${month}${sequence.toString().padStart(6, '0')}`;
+      this.orderNumber = `OD${year}${month}${sequence.toString().padStart(6, '0')}`;
     } catch (error) {
       console.error('Error generating order number:', error);
       // Fallback to timestamp-based order number
-      this.orderNumber = `CK${Date.now().toString().slice(-8)}`;
+      this.orderNumber = `OD${Date.now().toString().slice(-8)}`;
     }
   }
   next();

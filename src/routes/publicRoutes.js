@@ -7,6 +7,7 @@ import Bill from "../models/Bill.js";
 import PartnerPayout from "../models/PartnerPayout.js";
 import Partner from "../models/Partner.js";
 import HeroSlide from "../models/HeroSlide.js";
+import SystemSetting from "../models/SystemSetting.js";
 import { sendOTP } from "../lib/mailer.js";
 import { getOrSetCache, getCacheVersion } from "../lib/redis.js";
 import { rateLimit } from "../middleware/rateLimit.js";
@@ -202,7 +203,6 @@ router.get("/hero-slides", async (req, res) => {
 
 router.get("/settings", async (req, res) => {
   try {
-    const SystemSetting = (await import("../models/SystemSetting.js")).default;
     const settings = await SystemSetting.findOne();
     res.json({
       freeDeliveryAbove: settings?.freeDeliveryAbove ?? Number(process.env.FREE_DELIVERY_ABOVE || 999)
