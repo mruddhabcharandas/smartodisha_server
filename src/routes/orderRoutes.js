@@ -37,18 +37,26 @@ export const creditSellerWalletForOrder = async (orderId) => {
       return;
     }
 
-    // Group items by store
+    // Group earnings by store using base store price or storeRevenue
     const storeEarnings = {};
-    for (const item of order.items) {
-      const storeId = item.product?.store?.toString();
-      if (!storeId) continue;
-      const itemEarnings = (item.price || 0) * (item.quantity || 1);
-      storeEarnings[storeId] = (storeEarnings[storeId] || 0) + itemEarnings;
+    if (order.store && order.storeRevenue > 0) {
+      const storeId = order.store.toString();
+      storeEarnings[storeId] = Number(order.storeRevenue.toFixed(2));
+    } else {
+      for (const item of order.items) {
+        const storeId = item.product?.store?.toString() || order.store?.toString();
+        if (!storeId) continue;
+        const p = item.product;
+        const v = item.variantSku ? (p?.variants || []).find(v => v.sku === String(item.variantSku)) : null;
+        const basePrice = item.originalStorePrice ?? (v ? (v.originalStorePrice ?? v.price) : (p?.originalStorePrice ?? item.price ?? 0));
+        const itemEarnings = basePrice * (item.quantity || 1);
+        storeEarnings[storeId] = (storeEarnings[storeId] || 0) + itemEarnings;
+      }
     }
 
     // Credit each store
     for (const storeId of Object.keys(storeEarnings)) {
-      const amount = storeEarnings[storeId];
+      const amount = Number(storeEarnings[storeId].toFixed(2));
       if (amount <= 0) continue;
 
       await Store.findByIdAndUpdate(storeId, {
@@ -60,7 +68,7 @@ export const creditSellerWalletForOrder = async (orderId) => {
         type: "EARNING",
         amount,
         order: orderId,
-        note: `Earnings from Order #${orderId.toString().slice(-6).toUpperCase()}`
+        note: `Earnings from Order #${order.orderNumber || orderId.toString().slice(-6).toUpperCase()}`
       });
       console.log(`Credited ₹${amount} to store ${storeId} for order ${orderId}`);
     }
@@ -451,7 +459,10 @@ router.post("/", auth, requireRole("customer"), async (req, res) => {
   for (const it of items) {
     const p = products.find(x => x._id.toString() === it.productId);
     const v = it.variantSku ? (p?.variants || []).find(v => v.sku === String(it.variantSku)) : null;
-    const basePrice = v ? (v.originalStorePrice || v.price || 0) : (p?.originalStorePrice || p?.price || 0);
+    const storePercentage = p?.store?.storePercentage || 0;
+    const basePrice = v 
+      ? (v.originalStorePrice ?? (storePercentage > 0 ? Number((v.price / (1 + storePercentage / 100)).toFixed(2)) : v.price))
+      : (p?.originalStorePrice ?? (storePercentage > 0 ? Number((p.price / (1 + storePercentage / 100)).toFixed(2)) : p?.price ?? 0));
     baseTotal += basePrice * it.quantity;
   }
 
@@ -463,12 +474,17 @@ router.post("/", auth, requireRole("customer"), async (req, res) => {
   const orderItems = totals.items.map((it) => {
     const p = products.find(x => x._id.toString() === it.product.toString());
     const v = it.variantSku ? (p?.variants || []).find(v => v.sku === String(it.variantSku)) : null;
+    const storePercentage = p?.store?.storePercentage || 0;
+    const basePrice = v 
+      ? (v.originalStorePrice ?? (storePercentage > 0 ? Number((v.price / (1 + storePercentage / 100)).toFixed(2)) : v.price))
+      : (p?.originalStorePrice ?? (storePercentage > 0 ? Number((p.price / (1 + storePercentage / 100)).toFixed(2)) : p?.price ?? 0));
     return {
       product: it.product,
       variantSku: it.variantSku ? String(it.variantSku) : "",
       attributes: v ? (v.attributes instanceof Map ? Object.fromEntries(v.attributes) : v.attributes) : undefined,
       name: it.name,
       price: it.price,
+      originalStorePrice: basePrice,
       gst: it.gst,
       quantity: it.quantity,
       lineTotal: it.lineTotal,
@@ -682,12 +698,17 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
     const orderItems = totals.items.map((it) => {
       const p = products.find(x => x._id.toString() === it.product.toString());
       const v = it.variantSku ? (p?.variants || []).find(v => v.sku === String(it.variantSku)) : null;
+      const storePercentage = p?.store?.storePercentage || 0;
+      const basePrice = v 
+        ? (v.originalStorePrice ?? (storePercentage > 0 ? Number((v.price / (1 + storePercentage / 100)).toFixed(2)) : v.price))
+        : (p?.originalStorePrice ?? (storePercentage > 0 ? Number((p.price / (1 + storePercentage / 100)).toFixed(2)) : p?.price ?? 0));
       return {
         product: it.product,
         variantSku: it.variantSku ? String(it.variantSku) : "",
         attributes: v ? (v.attributes instanceof Map ? Object.fromEntries(v.attributes) : v.attributes) : undefined,
         name: it.name,
         price: it.price,
+        originalStorePrice: basePrice,
         gst: it.gst,
         quantity: it.quantity,
         lineTotal: it.lineTotal,
@@ -713,7 +734,10 @@ router.post("/prepare-payment", auth, requireRole("customer"), async (req, res) 
     for (const it of items) {
       const p = products.find(x => x._id.toString() === it.productId.toString());
       const v = it.variantSku ? (p?.variants || []).find(v => v.sku === String(it.variantSku)) : null;
-      const basePrice = v ? (v.originalStorePrice || v.price || 0) : (p?.originalStorePrice || p?.price || 0);
+      const storePercentage = p?.store?.storePercentage || 0;
+      const basePrice = v 
+        ? (v.originalStorePrice ?? (storePercentage > 0 ? Number((v.price / (1 + storePercentage / 100)).toFixed(2)) : v.price))
+        : (p?.originalStorePrice ?? (storePercentage > 0 ? Number((p.price / (1 + storePercentage / 100)).toFixed(2)) : p?.price ?? 0));
       baseTotal += basePrice * it.quantity;
     }
     const store = products[0]?.store;
@@ -889,7 +913,10 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
       for (const it of items) {
         const p = products.find(x => x._id.toString() === it.productId);
         const v = it.variantSku ? (p?.variants || []).find(v => v.sku === String(it.variantSku)) : null;
-        const basePrice = v ? (v.originalStorePrice || v.price || 0) : (p?.originalStorePrice || p?.price || 0);
+        const storePercentage = p?.store?.storePercentage || 0;
+        const basePrice = v 
+          ? (v.originalStorePrice ?? (storePercentage > 0 ? Number((v.price / (1 + storePercentage / 100)).toFixed(2)) : v.price))
+          : (p?.originalStorePrice ?? (storePercentage > 0 ? Number((p.price / (1 + storePercentage / 100)).toFixed(2)) : p?.price ?? 0));
         baseTotal += basePrice * it.quantity;
       }
       const adminCutPercent = store?.adminCutPercentage || 5;
@@ -921,12 +948,17 @@ router.post("/create-after-verify", auth, requireRole("customer"), async (req, r
       const orderItems = totals.items.map((it) => {
         const p = products.find(x => x._id.toString() === it.product.toString());
         const v = it.variantSku ? (p?.variants || []).find(v => v.sku === String(it.variantSku)) : null;
+        const storePercentage = p?.store?.storePercentage || 0;
+        const basePrice = v 
+          ? (v.originalStorePrice ?? (storePercentage > 0 ? Number((v.price / (1 + storePercentage / 100)).toFixed(2)) : v.price))
+          : (p?.originalStorePrice ?? (storePercentage > 0 ? Number((p.price / (1 + storePercentage / 100)).toFixed(2)) : p?.price ?? 0));
         return {
           product: it.product,
           variantSku: it.variantSku ? String(it.variantSku) : "",
           attributes: v ? (v.attributes instanceof Map ? Object.fromEntries(v.attributes) : v.attributes) : undefined,
           name: it.name,
           price: it.price,
+          originalStorePrice: basePrice,
           gst: it.gst,
           quantity: it.quantity,
           lineTotal: it.lineTotal,

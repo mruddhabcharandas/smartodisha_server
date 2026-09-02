@@ -383,16 +383,62 @@ router.get("/products/:id", protect, async (req, res) => {
   }
 });
 
-// Get store orders
+// Get store orders (sanitized to show seller base prices & seller revenue only)
 router.get("/orders", protect, async (req, res) => {
   try {
-    // Now we can just find orders where store matches, exclude pending/pending_payment/failed
     const orders = await Order.find({ 
       store: req.store._id,
       paymentStatus: { $ne: "FAILED" },
       status: { $nin: ["PENDING", "PENDING_PAYMENT"] }
-    }).sort({ createdAt: -1 });
-    res.json(orders);
+    }).populate("items.product", "price originalStorePrice variants").sort({ createdAt: -1 }).lean();
+
+    const storePercentage = req.store.storePercentage || 0;
+
+    const sanitizedOrders = orders.map(order => {
+      let sellerTotal = 0;
+      const sanitizedItems = (order.items || []).map(item => {
+        let sellerPrice = item.originalStorePrice;
+        if (sellerPrice === undefined || sellerPrice === null) {
+          const p = item.product;
+          if (p) {
+            if (item.variantSku && Array.isArray(p.variants)) {
+              const v = p.variants.find(v => v.sku === String(item.variantSku));
+              sellerPrice = v?.originalStorePrice ?? v?.price ?? p.originalStorePrice ?? p.price;
+            } else {
+              sellerPrice = p.originalStorePrice ?? p.price;
+            }
+          }
+        }
+        if (sellerPrice === undefined || sellerPrice === null) {
+          sellerPrice = storePercentage > 0 ? Number((item.price / (1 + storePercentage / 100)).toFixed(2)) : item.price;
+        }
+
+        const lineTotal = Number((sellerPrice * item.quantity).toFixed(2));
+        sellerTotal += lineTotal;
+
+        return {
+          ...item,
+          price: sellerPrice,
+          lineTotal: lineTotal
+        };
+      });
+
+      const finalSellerTotal = order.storeRevenue > 0 ? order.storeRevenue : Number(sellerTotal.toFixed(2));
+
+      return {
+        ...order,
+        items: sanitizedItems,
+        totalEstimate: finalSellerTotal,
+        productTotal: Number(sellerTotal.toFixed(2)),
+        shippingCost: 0,
+        codCharge: 0,
+        couponDiscount: 0,
+        storeRevenue: finalSellerTotal,
+        adminRevenue: undefined
+      };
+    });
+
+    res.json(sanitizedOrders);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch orders" });
@@ -918,8 +964,13 @@ router.get("/dashboard", protect, async (req, res) => {
     const activeProducts = await Product.countDocuments({ store: storeId, isActive: true });
     const outOfStock = await Product.countDocuments({ store: storeId, stock: 0 });
 
-    // Get recent orders
-    const recentOrders = await Order.find({ store: storeId }).sort({ createdAt: -1 }).limit(10);
+    // Get recent orders (sanitized for store)
+    const rawRecentOrders = await Order.find({ store: storeId, status: { $nin: ["PENDING", "PENDING_PAYMENT"] } }).sort({ createdAt: -1 }).limit(10).lean();
+    const recentOrders = rawRecentOrders.map(o => ({
+      ...o,
+      totalEstimate: o.storeRevenue > 0 ? o.storeRevenue : o.totalEstimate,
+      storeRevenue: o.storeRevenue > 0 ? o.storeRevenue : o.totalEstimate
+    }));
 
     // Calculate total revenue
     const totalRevenue = await Order.aggregate([
