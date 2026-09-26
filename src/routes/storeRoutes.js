@@ -851,7 +851,7 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
   }
 });
 
-// Download Delhivery PDF Label (seller)
+// Download Delhivery Label (seller)
 router.get("/orders/:id/delhivery/label/:waybill", protect, async (req, res) => {
   const waybill = req.params.waybill;
   try {
@@ -861,112 +861,55 @@ router.get("/orders/:id/delhivery/label/:waybill", protect, async (req, res) => 
     const { generateLabel } = await import("../services/delhivery.service.js");
     const labelResult = await generateLabel([waybill]);
 
-    // If Delhivery returns HTML packing slip/label, send it!
+    // If Delhivery returns direct HTML packing slip/label, send it!
     if (labelResult.format === "html" && labelResult.html) {
-      res.setHeader("Content-Type", "text/html");
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
       return res.send(labelResult.html);
     }
 
     // Extract PDF URL if returned as JSON data from Delhivery
     const pdfUrl = labelResult.pdfUrl || labelResult.pdf_url || labelResult.data?.pdf_url || labelResult.data?.packages?.[0]?.pdf_url;
 
-    // If Delhivery returns label, use it!
+    // If Delhivery returns direct PDF, send it
     if (labelResult.pdfBuffer || pdfUrl) {
       if (labelResult.pdfBuffer) {
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `inline; filename=label_${waybill}.pdf`);
         return res.send(labelResult.pdfBuffer);
       } else {
-        const axios = await import("axios");
-        const pdfResponse = await axios.default.get(pdfUrl, { responseType: "arraybuffer" });
+        const axios = (await import("axios")).default;
+        const pdfResponse = await axios.get(pdfUrl, { responseType: "arraybuffer" });
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `inline; filename=label_${waybill}.pdf`);
         return res.send(Buffer.from(pdfResponse.data));
       }
     }
 
-    // Fallback to custom PDF
-    const PDFDocument = (await import("pdfkit")).default;
-    const doc = new PDFDocument({ margin: 24, size: "A6" });
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `inline; filename=label_${waybill}.pdf`);
-    doc.pipe(res);
-    
-    doc.fontSize(18).text("SHIPPING LABEL", { align: "center", underline: true });
-    doc.moveDown(0.5);
-    if (waybill) {
-      doc.fontSize(14).text(`Waybill: ${waybill}`, { align: "center" });
-      doc.moveDown(0.5);
-    }
-
-    // Customer Info
-    doc.fontSize(12).text("SHIP TO:", { underline: true });
-    doc.fontSize(10);
-    doc.text(`Name: ${order.customer?.name || ""}`);
-    doc.text(`Phone: ${order.customer?.phone || ""}`);
-    const a = order.shippingAddress || {};
-    const addressParts = [a.line1, a.line2].filter(Boolean);
-    if (addressParts.length) doc.text(addressParts.join(", "));
-    const cityState = [a.city, a.state, a.pincode].filter(Boolean).join(", ");
-    if (cityState) doc.text(cityState);
-    
-    doc.moveDown(0.5);
-
-    // Items (simple list)
-    doc.fontSize(12).text("ITEMS:", { underline: true });
-    doc.fontSize(9);
-    (order.items || []).forEach((item, idx) => {
-      const sku = item.variantSku || item.sku || "N/A";
-      doc.text(`${idx + 1}. ${item.name} (SKU: ${sku}) x ${item.quantity}`);
+    // Render official Delhivery thermal label with barcodes, sort code, and store info
+    const { renderDelhiveryShippingLabelHtml } = await import("../lib/delhiveryLabelRenderer.js");
+    const packageData = labelResult.data?.packages?.[0] || labelResult.data || {};
+    const html = renderDelhiveryShippingLabelHtml({
+      order,
+      waybill,
+      packageData,
+      store: req.store
     });
-
-    doc.moveDown(0.5);
-    doc.fontSize(12).text(`Order Amount: ₹${Number(order.totalEstimate || 0).toLocaleString("en-IN")}`, { align: "right" });
-    
-    doc.end();
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.send(html);
   } catch (err) {
     console.error("Seller delhivery label failed:", err.response?.data || err.message);
-    // Fallback to custom PDF if Delhivery fails (simple shipping label only)
     try {
       const order = await Order.findOne({ _id: req.params.id, store: req.store._id }).lean();
-      const PDFDocument = (await import("pdfkit")).default;
-      const doc = new PDFDocument({ margin: 24, size: "A6" });
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `inline; filename=label_${waybill}.pdf`);
-      doc.pipe(res);
-      
-      doc.fontSize(18).text("SHIPPING LABEL", { align: "center", underline: true });
-      doc.moveDown(0.5);
-      if (waybill) {
-        doc.fontSize(14).text(`AWB: ${waybill}`, { align: "center" });
-        doc.moveDown(0.5);
-      }
-
-      // Customer Info
-      doc.fontSize(12).text("SHIP TO:", { underline: true });
-      doc.fontSize(10);
-      doc.text(`Name: ${order.customer?.name || ""}`);
-      doc.text(`Phone: ${order.customer?.phone || ""}`);
-      const a = order.shippingAddress || {};
-      const addressParts = [a.line1, a.line2].filter(Boolean);
-      if (addressParts.length) doc.text(addressParts.join(", "));
-      const cityState = [a.city, a.state, a.pincode].filter(Boolean).join(", ");
-      if (cityState) doc.text(cityState);
-      
-      doc.moveDown(0.5);
-
-      // Items (simple list)
-      doc.fontSize(12).text("ITEMS:", { underline: true });
-      doc.fontSize(9);
-      (order.items || []).forEach((item, idx) => {
-        const sku = item.variantSku || item.sku || "N/A";
-        doc.text(`${idx + 1}. ${item.name} (SKU: ${sku}) x ${item.quantity}`);
+      if (!order) return res.status(404).send("Order not found");
+      const { renderDelhiveryShippingLabelHtml } = await import("../lib/delhiveryLabelRenderer.js");
+      const html = renderDelhiveryShippingLabelHtml({
+        order,
+        waybill,
+        packageData: {},
+        store: req.store
       });
-
-      doc.moveDown(0.5);
-      doc.fontSize(12).text(`Order Amount: ₹${Number(order.totalEstimate || 0).toLocaleString("en-IN")}`, { align: "right" });
-      
-      doc.end();
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.send(html);
     } catch (fallbackErr) {
       res.status(500).json({ error: "label_generation_failed", message: fallbackErr.message });
     }

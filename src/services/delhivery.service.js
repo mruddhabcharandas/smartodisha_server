@@ -1,4 +1,4 @@
-import fetch from 'node-fetch';
+import axios from 'axios';
 
 const _sanitize = (s) => String(s || "").trim().replace(/^['"`]+|['"`]+$/g, "").replace(/\/+$/, "");
 const base = () => _sanitize(process.env.DELHIVERY_BASE_URL || "https://staging-express.delhivery.com");
@@ -476,42 +476,63 @@ export const generateLabel = async (waybills) => {
   console.log("Generating Delhivery label via GET:", url);
   
   try {
-    const res = await fetch(url, {
-      method: 'GET',
+    const res = await axios.get(url, {
       headers: {
         ...authHeader()
-      }
+      },
+      responseType: 'arraybuffer',
+      validateStatus: () => true
     });
     
-    if (!res.ok) {
+    if (res.status >= 400) {
+      const errText = Buffer.from(res.data).toString("utf8");
+      console.warn(`Delhivery packing slip API responded with status ${res.status}:`, errText);
       throw new Error(`Delhivery label generation API error: ${res.status}`);
     }
     
-    const contentType = res.headers.get("content-type") || "";
-    if (contentType.includes("html") || contentType.includes("text")) {
-      const htmlText = await res.text();
-      return {
-        success: true,
-        format: "html",
-        html: htmlText
-      };
-    } else if (contentType.includes("pdf")) {
-      const pdfBuffer = await res.buffer();
+    const contentType = String(res.headers["content-type"] || "");
+    const rawBuffer = Buffer.from(res.data);
+
+    if (contentType.includes("pdf")) {
       return {
         success: true,
         format: "pdf",
-        pdfBuffer: pdfBuffer
+        pdfBuffer: rawBuffer
+      };
+    } else if (contentType.includes("html")) {
+      return {
+        success: true,
+        format: "html",
+        html: rawBuffer.toString("utf8")
       };
     } else {
+      // Try to parse JSON data
       try {
-        const data = await res.json();
+        const text = rawBuffer.toString("utf8");
+        const json = JSON.parse(text);
+        
+        // If JSON contains a pdf_url or label_url, fetch it directly
+        const remotePdfUrl = json.pdfUrl || json.pdf_url || json.label_url || json.packages?.[0]?.pdf_url;
+        if (remotePdfUrl && typeof remotePdfUrl === "string" && remotePdfUrl.startsWith("http")) {
+          try {
+            const pdfFetch = await axios.get(remotePdfUrl, { responseType: "arraybuffer" });
+            return {
+              success: true,
+              format: "pdf",
+              pdfBuffer: Buffer.from(pdfFetch.data)
+            };
+          } catch (pdfErr) {
+            console.warn("Failed to download remote PDF from Delhivery URL:", pdfErr.message);
+          }
+        }
+        
         return {
           success: true,
           format: "json",
-          data: data
+          data: json,
+          packages: json.packages || []
         };
-      } catch (e) {
-        const rawBuffer = await res.buffer();
+      } catch (parseErr) {
         return {
           success: true,
           format: "pdf",
@@ -520,7 +541,7 @@ export const generateLabel = async (waybills) => {
       }
     }
   } catch (err) {
-    console.error("Error generating label:", err);
+    console.error("Error generating label from Delhivery:", err.message);
     throw err;
   }
 };

@@ -1632,6 +1632,71 @@ router.post("/:id/delhivery/standard-shipment", auth, requirePermission("orders"
   }
 });
 
+// Admin Delhivery Shipping Label
+router.get("/:id/delhivery/label/:waybill", auth, requirePermission("orders"), async (req, res) => {
+  const waybill = req.params.waybill;
+  try {
+    const order = await Order.findById(req.params.id).populate("store");
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const { generateLabel } = await import("../services/delhivery.service.js");
+    const labelResult = await generateLabel([waybill]);
+
+    // If Delhivery returns direct HTML packing slip/label, send it!
+    if (labelResult.format === "html" && labelResult.html) {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.send(labelResult.html);
+    }
+
+    // Extract PDF URL if returned as JSON data from Delhivery
+    const pdfUrl = labelResult.pdfUrl || labelResult.pdf_url || labelResult.data?.pdf_url || labelResult.data?.packages?.[0]?.pdf_url;
+
+    // If Delhivery returns direct PDF, send it
+    if (labelResult.pdfBuffer || pdfUrl) {
+      if (labelResult.pdfBuffer) {
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `inline; filename=label_${waybill}.pdf`);
+        return res.send(labelResult.pdfBuffer);
+      } else {
+        const axios = (await import("axios")).default;
+        const pdfResponse = await axios.get(pdfUrl, { responseType: "arraybuffer" });
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `inline; filename=label_${waybill}.pdf`);
+        return res.send(Buffer.from(pdfResponse.data));
+      }
+    }
+
+    // Render official Delhivery thermal label with barcodes, sort code, and store info
+    const { renderDelhiveryShippingLabelHtml } = await import("../lib/delhiveryLabelRenderer.js");
+    const packageData = labelResult.data?.packages?.[0] || labelResult.data || {};
+    const html = renderDelhiveryShippingLabelHtml({
+      order,
+      waybill,
+      packageData,
+      store: order.store || {}
+    });
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.send(html);
+  } catch (err) {
+    console.error("Admin delhivery label generation failed:", err.response?.data || err.message);
+    try {
+      const order = await Order.findById(req.params.id).populate("store").lean();
+      if (!order) return res.status(404).send("Order not found");
+      const { renderDelhiveryShippingLabelHtml } = await import("../lib/delhiveryLabelRenderer.js");
+      const html = renderDelhiveryShippingLabelHtml({
+        order,
+        waybill,
+        packageData: {},
+        store: order.store || {}
+      });
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.send(html);
+    } catch (fallbackErr) {
+      res.status(500).json({ error: "label_generation_failed", message: fallbackErr.message });
+    }
+  }
+});
+
 // Repay for failed payments
 router.post("/:id/repay", auth, requireRole("customer"), async (req, res) => {
   try {
