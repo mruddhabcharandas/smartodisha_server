@@ -30,6 +30,12 @@ export const creditSellerWalletForOrder = async (orderId) => {
     const order = await Order.findById(orderId).populate("items.product");
     if (!order) return;
 
+    // Check if cancelled, returned, or failed
+    if (["CANCELLED", "RETURNED", "FAILED"].includes(order.status)) {
+      console.log(`Order ${orderId} is ${order.status}, not crediting to seller wallet.`);
+      return;
+    }
+
     // Check if already credited
     const existingTx = await SellerTransaction.findOne({ order: orderId, type: "EARNING" });
     if (existingTx) {
@@ -1268,6 +1274,26 @@ router.post("/:id/cancel", auth, requirePermission("orders"), async (req, res) =
     order.refundReason = reason || "Cancelled by admin";
     order.refundStatus = "PENDING";
     await order.save();
+
+    // Reverse seller wallet earnings if order was previously credited
+    try {
+      const earningTxs = await SellerTransaction.find({ order: order._id, type: "EARNING" });
+      for (const tx of earningTxs) {
+        if (tx.amount > 0) {
+          await Store.findByIdAndUpdate(tx.store, { $inc: { walletPending: -tx.amount } });
+          await Store.updateOne({ _id: tx.store, walletPending: { $lt: 0 } }, { $set: { walletPending: 0 } });
+          await SellerTransaction.create({
+            store: tx.store,
+            type: "DEDUCTION",
+            amount: tx.amount,
+            order: order._id,
+            note: `Reversal for cancelled order #${order.orderNumber || order._id.toString().slice(-6).toUpperCase()}`
+          });
+        }
+      }
+    } catch (revErr) {
+      console.error("Seller wallet reversal failed on order cancellation:", revErr);
+    }
     
     // Create Cashfree refund
     try {
@@ -1513,6 +1539,10 @@ router.post("/:id/feedback", auth, requireRole("customer"), async (req, res) => 
 
     if (!["DELIVERED", "FULFILLED"].includes(order.status)) {
       return res.status(400).json({ error: "Feedback can only be submitted after order delivery" });
+    }
+
+    if (order.feedbackRating && order.feedbackRating > 0) {
+      return res.status(400).json({ error: "Feedback has already been submitted for this order" });
     }
 
     order.feedbackRating = r;

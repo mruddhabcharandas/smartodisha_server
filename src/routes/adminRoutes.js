@@ -174,6 +174,72 @@ router.delete("/stores/:id", auth, requireRole("admin"), async (req, res) => {
   }
 });
 
+// Approve pending pickup address for a store
+router.put("/stores/:id/approve-pickup", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const store = await Store.findById(req.params.id);
+    if (!store) {
+      return res.status(404).json({ error: "Store not found" });
+    }
+
+    if (!store.pendingPickupAddress || !store.pendingPickupAddress.line1) {
+      return res.status(400).json({ error: "No pending pickup address found for this store" });
+    }
+
+    // Apply pending pickup address to active pickup address
+    store.pickupAddress = {
+      line1: store.pendingPickupAddress.line1,
+      line2: store.pendingPickupAddress.line2 || "",
+      city: store.pendingPickupAddress.city,
+      state: store.pendingPickupAddress.state,
+      pincode: store.pendingPickupAddress.pincode
+    };
+    if (store.pendingPickupAddress.pickupName) {
+      store.pickupName = store.pendingPickupAddress.pickupName;
+    }
+    if (store.pendingPickupAddress.pickupPhone) {
+      store.pickupPhone = store.pendingPickupAddress.pickupPhone;
+    }
+
+    store.pickupAddressStatus = "ACTIVE";
+    store.pendingPickupAddress = null;
+    store.pickupAddressRequestedAt = null;
+
+    await store.save();
+    await bumpCacheVersion("stores");
+
+    const storeObj = store.toObject();
+    delete storeObj.password;
+    res.json({ message: "Pickup address approved successfully", store: storeObj });
+  } catch (err) {
+    console.error("Approve pickup error:", err);
+    res.status(500).json({ error: "Failed to approve pickup address" });
+  }
+});
+
+// Reject pending pickup address for a store
+router.put("/stores/:id/reject-pickup", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const store = await Store.findById(req.params.id);
+    if (!store) {
+      return res.status(404).json({ error: "Store not found" });
+    }
+
+    store.pickupAddressStatus = store.pickupAddress?.line1 ? "ACTIVE" : "NOT_SET";
+    store.pendingPickupAddress = null;
+    store.pickupAddressRequestedAt = null;
+
+    await store.save();
+
+    const storeObj = store.toObject();
+    delete storeObj.password;
+    res.json({ message: "Pickup address change rejected", store: storeObj });
+  } catch (err) {
+    console.error("Reject pickup error:", err);
+    res.status(500).json({ error: "Failed to reject pickup address" });
+  }
+});
+
 // Get all staff members
 router.get("/staff", auth, requireRole("admin"), async (req, res) => {
   const staff = await Admin.find({ role: "staff" }).select("-password");
@@ -336,7 +402,8 @@ router.get("/settings", auth, requireRole("admin"), async (req, res) => {
       companyPhone: process.env.COMPANY_PHONE || "",
       companyEmail: process.env.COMPANY_EMAIL || "",
       lowStockThreshold: Number(process.env.LOW_STOCK_THRESHOLD ?? 5),
-      freeDeliveryAbove: settings?.freeDeliveryAbove ?? Number(process.env.FREE_DELIVERY_ABOVE || 999)
+      freeDeliveryAbove: settings?.freeDeliveryAbove ?? Number(process.env.FREE_DELIVERY_ABOVE || 999),
+      supportWebhookUrl: settings?.supportWebhookUrl || process.env.SUPPORT_WEBHOOK_URL || ""
     });
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch settings" });
@@ -345,22 +412,30 @@ router.get("/settings", auth, requireRole("admin"), async (req, res) => {
 
 router.put("/settings", auth, requireRole("admin"), async (req, res) => {
   try {
-    const { freeDeliveryAbove } = req.body;
-    if (freeDeliveryAbove === undefined || isNaN(Number(freeDeliveryAbove))) {
-      return res.status(400).json({ error: "Invalid freeDeliveryAbove value" });
-    }
+    const { freeDeliveryAbove, supportWebhookUrl } = req.body;
 
     let settings = await SystemSetting.findOne();
     if (!settings) {
       settings = new SystemSetting();
     }
 
-    settings.freeDeliveryAbove = Number(freeDeliveryAbove);
+    if (freeDeliveryAbove !== undefined) {
+      if (isNaN(Number(freeDeliveryAbove))) {
+        return res.status(400).json({ error: "Invalid freeDeliveryAbove value" });
+      }
+      settings.freeDeliveryAbove = Number(freeDeliveryAbove);
+    }
+
+    if (supportWebhookUrl !== undefined) {
+      settings.supportWebhookUrl = String(supportWebhookUrl).trim();
+    }
+
     await settings.save();
 
     res.json({
       success: true,
-      freeDeliveryAbove: settings.freeDeliveryAbove
+      freeDeliveryAbove: settings.freeDeliveryAbove,
+      supportWebhookUrl: settings.supportWebhookUrl
     });
   } catch (err) {
     res.status(500).json({ error: err.message || "Failed to update settings" });

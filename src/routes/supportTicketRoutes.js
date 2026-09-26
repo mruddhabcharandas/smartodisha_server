@@ -2,6 +2,7 @@ import express from 'express';
 import SupportTicket from '../models/SupportTicket.js';
 import Order from '../models/Order.js';
 import { auth, requireRole } from '../middleware/auth.js';
+import { triggerSupportWebhook } from '../lib/supportWebhook.js';
 
 const router = express.Router();
 
@@ -33,10 +34,28 @@ router.post('/', auth, async (req, res) => {
     ticket.messages.push({
       sender: userId,
       senderModel: 'Customer',
-      message: description.trim()
+      message: description.trim(),
+      messageType: 'TEXT'
+    });
+
+    // Add default automated greeting from Support Team
+    ticket.messages.push({
+      senderModel: 'Admin',
+      message: 'Namaste! 🙏 Our support team will assist you soon. Please let us know how we can help you with your order or query.',
+      messageType: 'SYSTEM'
     });
 
     await ticket.save();
+
+    // Trigger external webhook
+    triggerSupportWebhook('TICKET_CREATED', {
+      ticketId: ticket._id,
+      customer: userId,
+      subject: ticket.subject,
+      category: ticket.category,
+      orderId: ticket.order
+    });
+
     res.status(201).json(ticket);
   } catch (err) {
     console.error('Error creating support ticket:', err);
@@ -100,7 +119,8 @@ router.post('/:ticketId/messages', auth, async (req, res) => {
     ticket.messages.push({
       sender: userId,
       senderModel: 'Customer',
-      message: message.trim()
+      message: message.trim(),
+      messageType: 'TEXT'
     });
 
     // If ticket was resolved or closed, re-open it on user reply
@@ -110,10 +130,82 @@ router.post('/:ticketId/messages', auth, async (req, res) => {
     }
 
     await ticket.save();
+
+    triggerSupportWebhook('USER_MESSAGE', {
+      ticketId: ticket._id,
+      customer: userId,
+      message: message.trim()
+    });
+
     res.json(ticket);
   } catch (err) {
     console.error('Error sending user message on ticket:', err);
     res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+// Fulfill a media request (user) - strictly single submission like Amazon
+router.post('/:ticketId/upload-media', auth, async (req, res) => {
+  try {
+    const { messageId, fileUrl, mediaType } = req.body;
+    const userId = getAuthId(req);
+
+    if (!fileUrl) {
+      return res.status(400).json({ error: 'File URL is required' });
+    }
+
+    const ticket = await SupportTicket.findOne({
+      _id: req.params.ticketId,
+      customer: userId
+    });
+
+    if (!ticket) {
+      return res.status(404).json({ error: 'Ticket not found' });
+    }
+
+    const targetMsg = ticket.messages.id(messageId);
+    if (!targetMsg) {
+      return res.status(404).json({ error: 'Media request not found' });
+    }
+
+    if (targetMsg.messageType !== 'MEDIA_REQUEST') {
+      return res.status(400).json({ error: 'Message is not a media request' });
+    }
+
+    if (targetMsg.mediaRequest?.status === 'FULFILLED') {
+      return res.status(400).json({ error: 'Media has already been submitted for this request. No further uploads allowed.' });
+    }
+
+    targetMsg.mediaRequest.status = 'FULFILLED';
+    targetMsg.mediaRequest.fulfilledUrl = fileUrl;
+    targetMsg.mediaRequest.fulfilledMediaType = mediaType || 'IMAGE';
+    targetMsg.mediaRequest.fulfilledAt = new Date();
+
+    ticket.messages.push({
+      sender: userId,
+      senderModel: 'Customer',
+      message: 'Uploaded verification media.',
+      messageType: 'MEDIA_RESPONSE',
+      attachments: [fileUrl]
+    });
+
+    if (['Resolved', 'Closed'].includes(ticket.status)) {
+      ticket.status = 'In Progress';
+    }
+
+    await ticket.save();
+
+    triggerSupportWebhook('MEDIA_UPLOADED', {
+      ticketId: ticket._id,
+      customer: userId,
+      fileUrl,
+      mediaType: mediaType || 'IMAGE'
+    });
+
+    res.json(ticket);
+  } catch (err) {
+    console.error('Error fulfilling media request:', err);
+    res.status(500).json({ error: 'Failed to upload media' });
   }
 });
 
@@ -134,6 +226,13 @@ router.put('/:ticketId/resolve', auth, async (req, res) => {
     ticket.resolvedAt = new Date();
 
     await ticket.save();
+
+    triggerSupportWebhook('STATUS_UPDATED', {
+      ticketId: ticket._id,
+      status: 'Resolved',
+      resolvedBy: 'Customer'
+    });
+
     res.json(ticket);
   } catch (err) {
     console.error('Error resolving ticket:', err);
@@ -184,6 +283,12 @@ router.put('/admin/:ticketId/status', auth, requireRole(['admin', 'staff']), asy
     }
 
     await ticket.save();
+
+    triggerSupportWebhook('STATUS_UPDATED', {
+      ticketId: ticket._id,
+      status
+    });
+
     res.json(ticket);
   } catch (err) {
     console.error('Error updating ticket status:', err);
@@ -209,7 +314,8 @@ router.post('/admin/:ticketId/messages', auth, requireRole(['admin', 'staff']), 
     ticket.messages.push({
       sender: adminId,
       senderModel: 'Admin',
-      message: message.trim()
+      message: message.trim(),
+      messageType: 'TEXT'
     });
 
     if (ticket.status === 'Open') {
@@ -217,6 +323,12 @@ router.post('/admin/:ticketId/messages', auth, requireRole(['admin', 'staff']), 
     }
 
     await ticket.save();
+
+    triggerSupportWebhook('ADMIN_REPLY', {
+      ticketId: ticket._id,
+      adminId,
+      message: message.trim()
+    });
 
     // Return populated ticket
     const populated = await SupportTicket.findById(ticket._id)
@@ -227,6 +339,52 @@ router.post('/admin/:ticketId/messages', auth, requireRole(['admin', 'staff']), 
   } catch (err) {
     console.error('Error sending admin ticket reply:', err);
     res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+// Request Photo/Video from Customer (Amazon style media verification)
+router.post('/admin/:ticketId/request-media', auth, requireRole(['admin', 'staff']), async (req, res) => {
+  try {
+    const { prompt, mediaType } = req.body;
+    const adminId = getAuthId(req);
+
+    const ticket = await SupportTicket.findById(req.params.ticketId);
+    if (!ticket) {
+      return res.status(404).json({ error: 'Ticket not found' });
+    }
+
+    ticket.messages.push({
+      sender: adminId,
+      senderModel: 'Admin',
+      message: prompt?.trim() || 'Support agent has requested photo or video verification for your issue.',
+      messageType: 'MEDIA_REQUEST',
+      mediaRequest: {
+        prompt: prompt?.trim() || 'Please share a clear photo or video showing the item condition and parcel label.',
+        mediaType: mediaType || 'IMAGE_OR_VIDEO',
+        status: 'PENDING'
+      }
+    });
+
+    if (ticket.status === 'Open') {
+      ticket.status = 'In Progress';
+    }
+
+    await ticket.save();
+
+    triggerSupportWebhook('MEDIA_REQUEST_CREATED', {
+      ticketId: ticket._id,
+      prompt: prompt || 'Verification requested',
+      mediaType: mediaType || 'IMAGE_OR_VIDEO'
+    });
+
+    const populated = await SupportTicket.findById(ticket._id)
+      .populate('customer', 'name email phone')
+      .populate('order', 'orderNumber totalEstimate paymentMethod status');
+
+    res.json(populated);
+  } catch (err) {
+    console.error('Error creating media request:', err);
+    res.status(500).json({ error: 'Failed to request media' });
   }
 });
 

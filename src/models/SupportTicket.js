@@ -4,16 +4,30 @@ const ticketMessageSchema = new mongoose.Schema({
   sender: {
     type: mongoose.Schema.Types.ObjectId,
     refPath: 'senderModel',
-    required: true
+    required: false
   },
   senderModel: {
     type: String,
     required: true,
-    enum: ['Customer', 'Admin']
+    enum: ['Customer', 'Admin', 'System'],
+    default: 'Customer'
   },
   message: {
     type: String,
     required: true
+  },
+  messageType: {
+    type: String,
+    enum: ['TEXT', 'MEDIA_REQUEST', 'MEDIA_RESPONSE', 'SYSTEM'],
+    default: 'TEXT'
+  },
+  mediaRequest: {
+    prompt: { type: String, default: '' },
+    mediaType: { type: String, enum: ['IMAGE', 'VIDEO', 'IMAGE_OR_VIDEO'], default: 'IMAGE_OR_VIDEO' },
+    status: { type: String, enum: ['PENDING', 'FULFILLED', 'EXPIRED'], default: 'PENDING' },
+    fulfilledUrl: { type: String, default: '' },
+    fulfilledMediaType: { type: String, default: '' },
+    fulfilledAt: { type: Date }
   },
   attachments: [{
     type: String

@@ -282,9 +282,27 @@ router.put("/profile", protect, async (req, res) => {
     const { name, phone, address, gstNumber, pickupAddress, pickupName, pickupPhone, delhiveryPickupLocation, shiprocketEmail, shiprocketPassword, image, sellerAvatar, currentPassword, bankDetails, upiId } = req.body;
     const store = await Store.findById(req.store._id);
 
-    // Check if pickup details are being changed
     const cleanStr = (val) => String(val || "").trim();
-    
+
+    // 1. Bank Details / UPI change check
+    const isBankChanged = () => {
+      if (bankDetails !== undefined) {
+        if (
+          cleanStr(bankDetails.accountNumber) !== cleanStr(store.bankDetails?.accountNumber) ||
+          cleanStr(bankDetails.ifscCode) !== cleanStr(store.bankDetails?.ifscCode) ||
+          cleanStr(bankDetails.accountName) !== cleanStr(store.bankDetails?.accountName) ||
+          cleanStr(bankDetails.bankName) !== cleanStr(store.bankDetails?.bankName)
+        ) {
+          return true;
+        }
+      }
+      if (upiId !== undefined && cleanStr(upiId) !== cleanStr(store.upiId)) {
+        return true;
+      }
+      return false;
+    };
+
+    // 2. Pickup Address change check
     const isAddressDiff = () => {
       if (!pickupAddress) return false;
       const fields = ["line1", "line2", "city", "state", "pincode"];
@@ -302,9 +320,18 @@ router.put("/profile", protect, async (req, res) => {
       (pickupPhone !== undefined && cleanStr(pickupPhone) !== cleanStr(store.pickupPhone)) ||
       (delhiveryPickupLocation !== undefined && cleanStr(delhiveryPickupLocation) !== cleanStr(store.delhiveryPickupLocation));
 
-    if (isPickupChanged) {
+    const bankRequiresPassword = isBankChanged();
+    const pickupRequiresPassword = isPickupChanged;
+
+    if (bankRequiresPassword || pickupRequiresPassword) {
       if (!currentPassword) {
-        return res.status(400).json({ error: "Current password is required to update pickup details" });
+        return res.status(400).json({
+          error: bankRequiresPassword && pickupRequiresPassword
+            ? "Current password is required to update bank details and pickup location"
+            : bankRequiresPassword
+            ? "Current password is required to update bank/UPI details"
+            : "Current password is required to update pickup location"
+        });
       }
       const isMatch = await store.comparePassword(currentPassword);
       if (!isMatch) {
@@ -316,15 +343,45 @@ router.put("/profile", protect, async (req, res) => {
       store.name = name || store.name;
       store.phone = phone || store.phone;
       store.address = address || store.address;
-      store.gstNumber = gstNumber || store.gstNumber;
-      store.pickupAddress = pickupAddress || store.pickupAddress;
-      store.pickupName = pickupName || store.pickupName;
-      store.pickupPhone = pickupPhone || store.pickupPhone;
+      store.gstNumber = gstNumber !== undefined ? gstNumber : store.gstNumber;
+      store.shiprocketEmail = shiprocketEmail !== undefined ? shiprocketEmail : store.shiprocketEmail;
+      store.shiprocketPassword = shiprocketPassword !== undefined ? shiprocketPassword : store.shiprocketPassword;
       store.delhiveryPickupLocation = delhiveryPickupLocation !== undefined ? delhiveryPickupLocation : store.delhiveryPickupLocation;
-      store.shiprocketEmail = shiprocketEmail || store.shiprocketEmail;
-      store.shiprocketPassword = shiprocketPassword || store.shiprocketPassword;
+
+      // Update bank details once authenticated
       if (bankDetails !== undefined) store.bankDetails = bankDetails;
       if (upiId !== undefined) store.upiId = upiId;
+
+      // Pickup Location logic: First time vs Update Approval
+      let pickupPendingApproval = false;
+      if (pickupAddress && isPickupChanged) {
+        const isFirstTime = !store.pickupAddress?.line1 && !store.pickupAddress?.pincode;
+        if (isFirstTime) {
+          // First time adding pickup location: Directly active without admin approval
+          store.pickupAddress = pickupAddress;
+          if (pickupName) store.pickupName = pickupName;
+          if (pickupPhone) store.pickupPhone = pickupPhone;
+          store.pickupAddressStatus = "ACTIVE";
+          store.pendingPickupAddress = null;
+        } else {
+          // Updating existing pickup location: Goes into pending approval
+          store.pendingPickupAddress = {
+            line1: pickupAddress.line1 || "",
+            line2: pickupAddress.line2 || "",
+            city: pickupAddress.city || "",
+            state: pickupAddress.state || "",
+            pincode: pickupAddress.pincode || "",
+            pickupName: pickupName || store.pickupName,
+            pickupPhone: pickupPhone || store.pickupPhone
+          };
+          store.pickupAddressStatus = "PENDING_APPROVAL";
+          store.pickupAddressRequestedAt = new Date();
+          pickupPendingApproval = true;
+        }
+      } else {
+        if (pickupName && !store.pickupAddressStatus?.includes("PENDING")) store.pickupName = pickupName;
+        if (pickupPhone && !store.pickupAddressStatus?.includes("PENDING")) store.pickupPhone = pickupPhone;
+      }
       
       // Update image if provided
       if (image) {
@@ -336,7 +393,7 @@ router.put("/profile", protect, async (req, res) => {
       }
       
       // Update seller avatar if provided
-      if (sellerAvatar !== undefined) { // Handle both setting and clearing
+      if (sellerAvatar !== undefined) {
         if (sellerAvatar) {
           if (typeof sellerAvatar === "string") {
             store.sellerAvatar = { url: sellerAvatar };
@@ -349,7 +406,12 @@ router.put("/profile", protect, async (req, res) => {
       }
 
       const updatedStore = await store.save();
-      res.json(updatedStore);
+      const respObj = updatedStore.toObject();
+      respObj.pickupPendingApproval = pickupPendingApproval;
+      if (pickupPendingApproval) {
+        respObj.pickupMessage = "New pickup location submitted and pending admin approval. Your current pickup location remains active.";
+      }
+      res.json(respObj);
     } else {
       res.status(404).json({ error: "Store not found" });
     }
@@ -423,17 +485,22 @@ router.get("/orders", protect, async (req, res) => {
         };
       });
 
-      const finalSellerTotal = order.storeRevenue > 0 ? order.storeRevenue : Number(sellerTotal.toFixed(2));
+      const isCancelled = ["CANCELLED", "RETURNED"].includes(order.status);
+      const calculatedRevenue = order.storeRevenue > 0 ? order.storeRevenue : Number(sellerTotal.toFixed(2));
+      const finalSellerTotal = isCancelled ? 0 : calculatedRevenue;
 
       return {
         ...order,
         items: sanitizedItems,
         totalEstimate: finalSellerTotal,
-        productTotal: Number(sellerTotal.toFixed(2)),
+        originalProductTotal: Number(sellerTotal.toFixed(2)),
+        productTotal: isCancelled ? 0 : Number(sellerTotal.toFixed(2)),
         shippingCost: 0,
         codCharge: 0,
         couponDiscount: 0,
         storeRevenue: finalSellerTotal,
+        sellerEarnings: finalSellerTotal,
+        isCancelled: isCancelled,
         adminRevenue: undefined
       };
     });
@@ -463,6 +530,10 @@ router.patch("/orders/:id/status", protect, async (req, res) => {
           paymentType: order.paymentMethod,
           existingOrderId: order._id
         });
+      } catch (billingErr) {}
+      try {
+        const { creditSellerWalletForOrder } = await import("./orderRoutes.js");
+        await creditSellerWalletForOrder(order._id);
       } catch (err) {}
     }
     await order.save();
@@ -526,6 +597,10 @@ router.patch("/orders/:id/deliver", protect, async (req, res) => {
         paymentType: order.paymentMethod,
         existingOrderId: order._id
       });
+      try {
+        const { creditSellerWalletForOrder } = await import("./orderRoutes.js");
+        await creditSellerWalletForOrder(order._id);
+      } catch (err) {}
     } catch (err) {}
 
     await AuditLog.create({
@@ -601,6 +676,27 @@ router.post("/orders/:id/cancel", protect, async (req, res) => {
     }
 
     order.status = "CANCELLED";
+
+    // Reverse seller wallet earnings if order was previously credited
+    try {
+      const SellerTransaction = (await import("../models/SellerTransaction.js")).default;
+      const earningTxs = await SellerTransaction.find({ order: order._id, type: "EARNING" });
+      for (const tx of earningTxs) {
+        if (tx.amount > 0) {
+          await Store.findByIdAndUpdate(tx.store, { $inc: { walletPending: -tx.amount } });
+          await Store.updateOne({ _id: tx.store, walletPending: { $lt: 0 } }, { $set: { walletPending: 0 } });
+          await SellerTransaction.create({
+            store: tx.store,
+            type: "DEDUCTION",
+            amount: tx.amount,
+            order: order._id,
+            note: `Reversal for cancelled order #${order.orderNumber || order._id.toString().slice(-6).toUpperCase()}`
+          });
+        }
+      }
+    } catch (walletRevErr) {
+      console.error("Seller wallet reversal failed on store cancellation:", walletRevErr);
+    }
 
     // Initiate Cashfree refund if order was paid online
     const amountPaid = order.paymentStatus === "PAID" && ["CASHFREE", "COD"].includes(order.paymentMethod)
@@ -911,25 +1007,30 @@ router.get("/dashboard", protect, async (req, res) => {
 
     // Get recent orders (sanitized for store)
     const rawRecentOrders = await Order.find({ store: storeId, status: { $nin: ["PENDING", "PENDING_PAYMENT"] } }).sort({ createdAt: -1 }).limit(10).lean();
-    const recentOrders = rawRecentOrders.map(o => ({
-      ...o,
-      totalEstimate: o.storeRevenue > 0 ? o.storeRevenue : o.totalEstimate,
-      storeRevenue: o.storeRevenue > 0 ? o.storeRevenue : o.totalEstimate
-    }));
+    const recentOrders = rawRecentOrders.map(o => {
+      const isCancelled = ["CANCELLED", "RETURNED"].includes(o.status);
+      const rev = o.storeRevenue > 0 ? o.storeRevenue : o.totalEstimate;
+      return {
+        ...o,
+        totalEstimate: isCancelled ? 0 : rev,
+        storeRevenue: isCancelled ? 0 : rev,
+        sellerEarnings: isCancelled ? 0 : rev
+      };
+    });
 
-    // Calculate total revenue
+    // Calculate total revenue (EXCLUDE CANCELLED, RETURNED, FAILED)
     const totalRevenue = await Order.aggregate([
-      { $match: { store: storeId } },
+      { $match: { store: storeId, status: { $nin: ["CANCELLED", "RETURNED", "FAILED", "PENDING_PAYMENT"] } } },
       { $group: { _id: null, total: { $sum: "$storeRevenue" } } }
     ]);
 
     // Calculate pending and received revenue
     const revenueBreakdown = await Order.aggregate([
-      { $match: { store: storeId } },
+      { $match: { store: storeId, status: { $nin: ["CANCELLED", "RETURNED", "FAILED"] } } },
       { $group: { 
         _id: null, 
         pending: { 
-          $sum: { $cond: [ { $in: [ "$status", ["NEW", "PACKED", "PENDING_PAYMENT"] ] }, "$storeRevenue", 0 ] }
+          $sum: { $cond: [ { $in: [ "$status", ["NEW", "CONFIRMED", "PROCESSING", "PACKED", "SHIPPED", "OUT_FOR_DELIVERY"] ] }, "$storeRevenue", 0 ] }
         },
         received: { 
           $sum: { $cond: [ { $in: [ "$status", ["DELIVERED", "FULFILLED"] ] }, "$storeRevenue", 0 ] }
@@ -941,9 +1042,9 @@ router.get("/dashboard", protect, async (req, res) => {
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    // Monthly revenue breakdown
+    // Monthly revenue breakdown (EXCLUDE CANCELLED, RETURNED, FAILED)
     const monthlyRevenue = await Order.aggregate([
-      { $match: { store: storeId, createdAt: { $gte: startOfMonth } } },
+      { $match: { store: storeId, status: { $nin: ["CANCELLED", "RETURNED", "FAILED"] }, createdAt: { $gte: startOfMonth } } },
       { $group: { _id: null, total: { $sum: "$storeRevenue" }, count: { $sum: 1 } } }
     ]);
 
@@ -1633,14 +1734,36 @@ router.get("/wallet", protect, async (req, res) => {
 
     const SellerTransaction = (await import("../models/SellerTransaction.js")).default;
     const transactions = await SellerTransaction.find({ store: req.store._id })
-      .populate("order", "_id totalEstimate customer")
+      .populate("order", "_id totalEstimate storeRevenue status customer orderNumber")
       .sort({ createdAt: -1 })
       .lean();
 
+    // Sanitize transactions so seller NEVER sees customer markup price or earnings on cancelled orders
+    const sanitizedTransactions = transactions.map(t => {
+      let isCancelled = false;
+      let sellerPrice = t.amount;
+      if (t.order) {
+        isCancelled = ["CANCELLED", "RETURNED", "FAILED"].includes(t.order.status);
+        sellerPrice = t.order.storeRevenue > 0 ? t.order.storeRevenue : (isCancelled ? 0 : t.amount);
+      }
+      return {
+        ...t,
+        amount: isCancelled && t.type === 'EARNING' ? 0 : t.amount,
+        isCancelled,
+        order: t.order ? {
+          _id: t.order._id,
+          orderNumber: t.order.orderNumber,
+          status: t.order.status,
+          totalEstimate: isCancelled ? 0 : sellerPrice,
+          storeRevenue: isCancelled ? 0 : sellerPrice
+        } : null
+      };
+    });
+
     res.json({
-      walletPending: store.walletPending || 0,
+      walletPending: Math.max(0, store.walletPending || 0),
       walletPaid: store.walletPaid || 0,
-      transactions
+      transactions: sanitizedTransactions
     });
   } catch (err) {
     console.error("Seller wallet fetch failed:", err);

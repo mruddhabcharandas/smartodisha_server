@@ -43,6 +43,21 @@ const storeSchema = new mongoose.Schema(
     pickupName: { type: String, default: "" },
     pickupPhone: { type: String, default: "" },
     delhiveryPickupLocation: { type: String, default: "" },
+    pendingPickupAddress: {
+      line1: { type: String, default: "" },
+      line2: { type: String, default: "" },
+      city: { type: String, default: "" },
+      state: { type: String, default: "" },
+      pincode: { type: String, default: "" },
+      pickupName: { type: String, default: "" },
+      pickupPhone: { type: String, default: "" }
+    },
+    pickupAddressStatus: {
+      type: String,
+      enum: ['NOT_SET', 'ACTIVE', 'PENDING_APPROVAL'],
+      default: 'NOT_SET'
+    },
+    pickupAddressRequestedAt: { type: Date },
     shiprocketEmail: { type: String, default: "" },
     shiprocketPassword: { type: String, default: "" },
     walletPending: { type: Number, default: 0 },

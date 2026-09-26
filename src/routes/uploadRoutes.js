@@ -81,4 +81,60 @@ router.post("/image", auth, requireRole(["admin", "store"]), upload.single("file
   }
 });
 
+// General support media upload for customer photos and videos
+router.post("/media", auth, upload.single("file"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "missing_file" });
+
+  try {
+    const isVideo = req.file.mimetype.startsWith("video/");
+    const isImage = req.file.mimetype.startsWith("image/");
+    if (!isVideo && !isImage) {
+      return res.status(400).json({ error: "Only image and video files are permitted" });
+    }
+
+    let result;
+
+    if (process.env.AWS_S3_BUCKET_NAME) {
+      try {
+        result = await uploadBuffer(req.file.buffer, "support_media", {
+          mimetype: req.file.mimetype,
+          originalName: req.file.originalname
+        });
+        if (result?.url) {
+          result.mediaType = isVideo ? "VIDEO" : "IMAGE";
+        }
+      } catch (s3Err) {
+        console.warn("S3 media upload fallback to local", s3Err);
+        result = null;
+      }
+    }
+
+    if (!result) {
+      if (!fs.existsSync(LOCAL_UPLOAD_DIR)) {
+        fs.mkdirSync(LOCAL_UPLOAD_DIR, { recursive: true });
+      }
+
+      const ext = path.extname(req.file.originalname) || (isVideo ? ".mp4" : ".jpg");
+      const random = crypto.randomBytes(4).toString("hex");
+      const key = `uploads/media-${Date.now()}-${random}${ext}`;
+      const localPath = path.resolve(__dirname, "../../public/", key);
+
+      fs.writeFileSync(localPath, req.file.buffer);
+
+      const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT || 5000}`;
+      result = {
+        url: `${baseUrl}/${key}`,
+        key,
+        mediaType: isVideo ? "VIDEO" : "IMAGE",
+        contentType: req.file.mimetype
+      };
+    }
+
+    res.json(result);
+  } catch (e) {
+    console.error("Media upload error:", e);
+    res.status(500).json({ error: "upload_failed" });
+  }
+});
+
 export default router;
