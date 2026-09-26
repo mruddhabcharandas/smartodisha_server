@@ -4,7 +4,7 @@ import * as delhivery from "./delhivery.service.js";
 import { notifyAdmin } from "../lib/socket.js";
 import { createBillFromData } from "../lib/billing.js";
 import { creditSellerWalletForOrder } from "../routes/orderRoutes.js";
-import { sendEmail, renderMail } from "../lib/mailer.js";
+import { sendEmail, renderMail, sendCustomerOrderStatusUpdateEmail } from "../lib/mailer.js";
 
 /**
  * Maps raw Delhivery status text / code to internal Order status enum:
@@ -151,8 +151,16 @@ export const updateOrderWithDelhiveryStatus = async (orderOrId, rawDelhiveryStat
         order.status = targetStatus;
         hasChanged = true;
 
-        // If newly marked DELIVERED:
-        if (targetStatus === "DELIVERED") {
+        // Trigger Customer Status Emails based on tracking
+        if (targetStatus === "SHIPPED") {
+          sendCustomerOrderStatusUpdateEmail(order, "SHIPPED").catch(err => {
+            console.warn(`[Delhivery Sync] Shipped email error:`, err.message);
+          });
+        } else if (targetStatus === "OUT_FOR_DELIVERY") {
+          sendCustomerOrderStatusUpdateEmail(order, "OUT_FOR_DELIVERY").catch(err => {
+            console.warn(`[Delhivery Sync] Out for delivery email error:`, err.message);
+          });
+        } else if (targetStatus === "DELIVERED") {
           order.paymentStatus = "PAID";
 
           // Credit seller wallet
@@ -174,29 +182,10 @@ export const updateOrderWithDelhiveryStatus = async (orderOrId, rawDelhiveryStat
             // Ignore if bill already exists or stock handled
           }
 
-          // Send Delivery Confirmation Email
-          try {
-            const customerEmail = order.customer?.email;
-            if (customerEmail) {
-              const html = renderMail({
-                heading: "Order Delivered!",
-                subheading: `Your package for Order #${order.orderNumber || order._id.toString().slice(-6).toUpperCase()} has been delivered successfully by Delhivery.`,
-                highlight: "DELIVERED",
-                blocks: [
-                  { label: "Order Number", value: order.orderNumber || String(order._id).slice(-6).toUpperCase() },
-                  { label: "Waybill Number", value: order.shipping?.waybill || "N/A" },
-                  { label: "Delivered To", value: order.customer?.name || "Customer" }
-                ]
-              });
-              await sendEmail({
-                to: customerEmail,
-                subject: `Your SmartOdisha Order #${order.orderNumber} has been Delivered!`,
-                html
-              });
-            }
-          } catch (mailErr) {
+          // Send Luxury Delivery Confirmation Email
+          sendCustomerOrderStatusUpdateEmail(order, "DELIVERED").catch(mailErr => {
             console.warn(`[Delhivery Sync] Delivery email notification failed:`, mailErr.message);
-          }
+          });
         }
       }
     }

@@ -11,7 +11,7 @@ import SubCategory from "../models/SubCategory.js";
 import Brand from "../models/Brand.js";
 import AuditLog from "../models/AuditLog.js";
 import StockTxn from "../models/StockTxn.js";
-import { sendEmail } from "../lib/mailer.js";
+import { sendEmail, sendCustomerOrderStatusUpdateEmail } from "../lib/mailer.js";
 import { delCache, bumpCacheVersion } from "../lib/redis.js";
 
 const normalizeSpecifications = (arr) => {
@@ -635,6 +635,12 @@ router.patch("/orders/:id/status", protect, async (req, res) => {
       note: `Status updated by store to ${req.body.status}`
     });
 
+    if (["SHIPPED", "OUT_FOR_DELIVERY", "DELIVERED", "CANCELLED"].includes(req.body.status)) {
+      sendCustomerOrderStatusUpdateEmail(order, req.body.status).catch(err => {
+        console.warn("Failed to send status update email from store:", err?.message || err);
+      });
+    }
+
     res.json(order);
   } catch (err) {
     res.status(500).json({ error: "status_update_failed" });
@@ -698,6 +704,10 @@ router.patch("/orders/:id/deliver", protect, async (req, res) => {
       entityType: "ORDER",
       entityId: order._id.toString(),
       note: "Order marked Delivered by store"
+    });
+
+    sendCustomerOrderStatusUpdateEmail(order, "DELIVERED").catch(err => {
+      console.warn("Failed to send delivery email from store:", err?.message || err);
     });
 
     res.json(order);
@@ -836,6 +846,10 @@ router.post("/orders/:id/cancel", protect, async (req, res) => {
       entityType: "ORDER",
       entityId: order._id.toString(),
       note: `Order cancelled by store manager. Reason: ${reason || "None"}`
+    });
+
+    sendCustomerOrderStatusUpdateEmail(order, "CANCELLED", { reason: reason || "Cancelled by store" }).catch(err => {
+      console.warn("Failed to send cancel email from store:", err?.message || err);
     });
 
     res.json({ success: true, message: "Order cancelled successfully", order });
@@ -1017,6 +1031,11 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
       order.shippingAddress = addr;
       order.status = "SHIPPED";
       await order.save();
+
+      // Send Customer Dispatched & Tracking Email
+      sendCustomerOrderStatusUpdateEmail(order, "SHIPPED").catch(err => {
+        console.warn("Failed to send shipment email from store:", err?.message || err);
+      });
 
       await AuditLog.create({
         actorId: req.store._id,

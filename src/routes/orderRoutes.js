@@ -16,7 +16,7 @@ import { computeTotals } from "../lib/invoice.js";
 import cashfree from "../lib/cashfree.js";
 import crypto from "crypto";
 import { createBillFromData } from "../lib/billing.js";
-import { sendEmail, renderMail } from "../lib/mailer.js";
+import { sendEmail, renderMail, sendCustomerOrderConfirmationEmail, sendSellerNewOrderAlertEmail, sendCustomerOrderStatusUpdateEmail } from "../lib/mailer.js";
 import AuditLog from "../models/AuditLog.js";
 import { notifyAdmin } from "../lib/socket.js";
 import SellerTransaction from "../models/SellerTransaction.js";
@@ -248,6 +248,11 @@ const tryCreateDelhiveryShipment = async (order) => {
       order.status = "SHIPPED";
       await order.save();
 
+      // Send Customer Dispatched & Tracking Email
+      sendCustomerOrderStatusUpdateEmail(order, "SHIPPED").catch(mailErr => {
+        console.warn("Failed to send customer shipment email:", mailErr?.message || mailErr);
+      });
+
       try {
         await AuditLog.create({
           actorId: null,
@@ -387,67 +392,40 @@ export const confirmAndFinalizeOrder = async (order, cashfreePaymentId, cashfree
     console.error("Billing creation failed on finalize:", err);
   }
 
-  // Send Emails
+  // Send Luxury Emails
   try {
-    const customerEmail = order.customer.email || process.env.MAIL_TO || process.env.COMPANY_EMAIL;
     const adminEmail = process.env.ADMIN_EMAIL || process.env.COMPANY_EMAIL;
     
-    // 1. Notify Customer
-    const customerHtml = renderMail({
-      heading: order.paymentMethod === "COD" ? "Order Confirmed" : "Payment Confirmed",
-      subheading: `Hi ${order.customer.name}, your order ${order.orderNumber} has been successfully placed.`,
-      highlight: `Order ID: ${order.orderNumber}`,
-      blocks: [
-        { label: "Payment Method", value: order.paymentMethod },
-        { label: "Grand Total", value: `₹${Number(order.totalEstimate).toLocaleString("en-IN")}` },
-        { label: "Status", value: order.status }
-      ],
-      items: order.items,
-      totals: {
-        subtotal: order.productTotal + order.couponDiscount,
-        discount: order.couponDiscount,
-        gstTotal: order.items.reduce((sum, it) => sum + (it.gst || 0), 0),
-        total: order.totalEstimate
-      }
+    // 1. Notify Customer with full order confirmation & tracking
+    sendCustomerOrderConfirmationEmail(order).catch(err => {
+      console.warn("Failed to send customer order confirmation email:", err?.message || err);
     });
-    if (customerEmail) {
-      await sendEmail({ to: customerEmail, subject: `Order Confirmed - ${order.orderNumber}`, html: customerHtml });
-    }
 
-    // 2. Notify Seller (Store)
+    // 2. Notify Seller (Store) with new order packing checklist & earnings
     if (order.store) {
-      const storeObj = await Store.findById(order.store);
-      if (storeObj && storeObj.email) {
-        const sellerHtml = renderMail({
-          heading: "New Order Received!",
-          subheading: `You have received a new order ${order.orderNumber} from ${order.customer.name}.`,
-          highlight: `Order ID: ${order.orderNumber}`,
-          blocks: [
-            { label: "Customer Name", value: order.customer.name },
-            { label: "Customer Phone", value: order.customer.phone },
-            { label: "Store Revenue", value: `₹${Number(order.storeRevenue).toLocaleString("en-IN")}` },
-            { label: "Payment", value: order.paymentMethod }
-          ],
-          items: order.items
-        });
-        await sendEmail({ to: storeObj.email, subject: `New Order Received - ${order.orderNumber}`, html: sellerHtml });
-      }
+      Store.findById(order.store).then(storeObj => {
+        if (storeObj && storeObj.email) {
+          sendSellerNewOrderAlertEmail(storeObj.email, storeObj.name, order).catch(err => {
+            console.warn("Failed to send seller new order alert email:", err?.message || err);
+          });
+        }
+      }).catch(e => console.warn("Failed to fetch store for email alert:", e));
     }
 
     // 3. Notify Admin
     if (adminEmail) {
       const adminHtml = renderMail({
         heading: "New System Order",
-        subheading: `A new order ${order.orderNumber} has been placed in the system.`,
-        highlight: `Revenue: ₹${Number(order.adminRevenue).toLocaleString("en-IN")}`,
+        subheading: `A new order #${order.orderNumber} has been placed in the system.`,
+        highlight: `Revenue: ₹${Number(order.adminRevenue || 0).toLocaleString("en-IN")}`,
         blocks: [
           { label: "Order Number", value: order.orderNumber },
-          { label: "Total Sale", value: `₹${Number(order.totalEstimate).toLocaleString("en-IN")}` },
-          { label: "Admin Cut", value: `₹${Number(order.adminRevenue).toLocaleString("en-IN")}` },
-          { label: "Customer", value: `${order.customer.name} (${order.customer.phone})` }
+          { label: "Total Sale", value: `₹${Number(order.totalEstimate || 0).toLocaleString("en-IN")}` },
+          { label: "Admin Cut", value: `₹${Number(order.adminRevenue || 0).toLocaleString("en-IN")}` },
+          { label: "Customer", value: `${order.customer?.name} (${order.customer?.phone})` }
         ]
       });
-      await sendEmail({ to: adminEmail, subject: `System Order Alert - ${order.orderNumber}`, html: adminHtml });
+      sendEmail({ to: adminEmail, subject: `System Order Alert - #${order.orderNumber}`, html: adminHtml }).catch(() => {});
     }
 
   } catch (err) {
@@ -1345,6 +1323,11 @@ router.post("/:id/cancel", auth, requirePermission("orders"), async (req, res) =
         entityId: order._id.toString(),
         note: `Order cancelled. Refund amount: ₹${refundAmount.toLocaleString()}, Deduction: ₹${deductionAmount.toLocaleString()}`
       });
+
+      // Send cancellation confirmation email to customer
+      sendCustomerOrderStatusUpdateEmail(order, "CANCELLED", { reason: reason || "Order cancelled by admin" }).catch(err => {
+        console.warn("Failed to send cancellation email:", err?.message || err);
+      });
       
       res.json({
         success: true,
@@ -1513,6 +1496,11 @@ router.post("/:id/cancel-customer", auth, requireRole("customer"), async (req, r
       entityType: "ORDER",
       entityId: order._id.toString(),
       note: `Order cancelled by customer. Reason: ${reason || "None"}`
+    });
+
+    // Send cancellation confirmation email to customer
+    sendCustomerOrderStatusUpdateEmail(order, "CANCELLED", { reason: reason || "Cancelled by you" }).catch(err => {
+      console.warn("Failed to send customer self-cancellation email:", err?.message || err);
     });
 
     res.json({

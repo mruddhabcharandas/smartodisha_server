@@ -3,7 +3,7 @@ import jwt from "jsonwebtoken";
 import Admin from "../models/Admin.js";
 import Customer from "../models/Customer.js";
 import OTP from "../models/OTP.js";
-import { sendOTP, sendEmail } from "../lib/mailer.js";
+import { sendOTP, sendEmail, sendUserWelcomeEmail, sendPasswordChangedEmail } from "../lib/mailer.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 
 const router = express.Router();
@@ -108,6 +108,11 @@ router.post("/customer/verify-otp", async (req, res) => {
 
   await OTP.deleteOne({ _id: record._id });
 
+  // Send luxury welcome email
+  sendUserWelcomeEmail(customer.email, customer.name).catch(err => {
+    console.warn("Failed to send welcome email:", err?.message || err);
+  });
+
   const token = jwt.sign(
     { id: customer._id.toString(), role: "customer", email: customer.email },
     process.env.JWT_SECRET,
@@ -186,6 +191,11 @@ router.post("/customer/reset-password", rateLimit("customer-reset-password", 5, 
   await user.save();
 
   await OTP.deleteOne({ _id: record._id });
+
+  // Send security confirmation email
+  sendPasswordChangedEmail(user.email, user.name).catch(err => {
+    console.warn("Failed to send password changed confirmation:", err?.message || err);
+  });
 
   res.json({ message: "password_reset_success" });
 });
