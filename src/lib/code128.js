@@ -13,7 +13,7 @@ const CODE128_PATTERNS = [
   "114131", "311141", "411131", "211412", "211214", "211232", "2331112"
 ];
 
-export function generateCode128Svg(text, { height = 65, barWidth = 2, showText = true } = {}) {
+export function getCode128Modules(text) {
   const clean = String(text || "").trim();
   if (!clean) return "";
 
@@ -48,8 +48,18 @@ export function generateCode128Svg(text, { height = 65, barWidth = 2, showText =
       }
     }
   }
-  // Add termination bar
   modules += "11";
+  return modules;
+}
+
+export function generateCode128Svg(text, { height = 65, barWidth = 2, showText = true } = {}) {
+  const clean = String(text || "").trim();
+  if (!clean) return "";
+
+  const modules = getCode128Modules(clean);
+  if (!modules) return "";
+
+  // Render SVG bars
 
   // Render SVG bars
   const totalWidth = modules.length * barWidth;

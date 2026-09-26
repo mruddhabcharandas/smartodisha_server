@@ -471,74 +471,78 @@ export const generateLabel = async (waybills) => {
   }
   
   const wbns = waybillArray.join(",");
-  // Officially, Delhivery API uses /api/p/packing_slip (GET with wbns query param)
-  const url = `${b}/api/p/packing_slip?wbns=${wbns}`;
-  console.log("Generating Delhivery label via GET:", url);
   
-  try {
-    const res = await axios.get(url, {
-      headers: {
-        ...authHeader()
-      },
+  // Officially Delhivery API uses /api/p/packing_slip (try with &pdf=true first)
+  const tryFetchLabel = async (withPdfParam = true) => {
+    const url = `${b}/api/p/packing_slip?wbns=${wbns}${withPdfParam ? "&pdf=true" : ""}`;
+    console.log("Generating Delhivery label from:", url);
+    return axios.get(url, {
+      headers: { ...authHeader() },
       responseType: 'arraybuffer',
       validateStatus: () => true
     });
-    
+  };
+
+  try {
+    let res = await tryFetchLabel(true);
+    if (res.status >= 400) {
+      console.warn(`Delhivery packing slip API with pdf=true responded with status ${res.status}, retrying without &pdf=true`);
+      res = await tryFetchLabel(false);
+    }
+
     if (res.status >= 400) {
       const errText = Buffer.from(res.data).toString("utf8");
-      console.warn(`Delhivery packing slip API responded with status ${res.status}:`, errText);
+      console.warn(`Delhivery packing slip API error ${res.status}:`, errText);
       throw new Error(`Delhivery label generation API error: ${res.status}`);
     }
-    
+
     const contentType = String(res.headers["content-type"] || "");
     const rawBuffer = Buffer.from(res.data);
 
-    if (contentType.includes("pdf")) {
+    // Direct PDF from Delhivery
+    if (contentType.includes("pdf") || rawBuffer.slice(0, 5).toString() === "%PDF-") {
       return {
         success: true,
         format: "pdf",
         pdfBuffer: rawBuffer
       };
-    } else if (contentType.includes("html")) {
+    }
+
+    // Try to parse JSON data
+    try {
+      const text = rawBuffer.toString("utf8");
+      const json = JSON.parse(text);
+
+      const pkg = json.packages?.[0] || json.package || {};
+      const remotePdfUrl = json.pdf_download_link || json.pdfUrl || json.pdf_url || json.label_url || json.download_url ||
+        pkg.pdf_download_link || pkg.pdf_url || pkg.label_url || pkg.download_url;
+
+      if (remotePdfUrl && typeof remotePdfUrl === "string" && remotePdfUrl.startsWith("http")) {
+        try {
+          console.log("Downloading official Delhivery PDF from remote URL:", remotePdfUrl);
+          const pdfFetch = await axios.get(remotePdfUrl, { responseType: "arraybuffer" });
+          return {
+            success: true,
+            format: "pdf",
+            pdfBuffer: Buffer.from(pdfFetch.data)
+          };
+        } catch (pdfErr) {
+          console.warn("Failed to download remote PDF from Delhivery URL:", pdfErr.message);
+        }
+      }
+
       return {
         success: true,
-        format: "html",
-        html: rawBuffer.toString("utf8")
+        format: "json",
+        data: json,
+        packages: json.packages || []
       };
-    } else {
-      // Try to parse JSON data
-      try {
-        const text = rawBuffer.toString("utf8");
-        const json = JSON.parse(text);
-        
-        // If JSON contains a pdf_url or label_url, fetch it directly
-        const remotePdfUrl = json.pdfUrl || json.pdf_url || json.label_url || json.packages?.[0]?.pdf_url;
-        if (remotePdfUrl && typeof remotePdfUrl === "string" && remotePdfUrl.startsWith("http")) {
-          try {
-            const pdfFetch = await axios.get(remotePdfUrl, { responseType: "arraybuffer" });
-            return {
-              success: true,
-              format: "pdf",
-              pdfBuffer: Buffer.from(pdfFetch.data)
-            };
-          } catch (pdfErr) {
-            console.warn("Failed to download remote PDF from Delhivery URL:", pdfErr.message);
-          }
-        }
-        
-        return {
-          success: true,
-          format: "json",
-          data: json,
-          packages: json.packages || []
-        };
-      } catch (parseErr) {
-        return {
-          success: true,
-          format: "pdf",
-          pdfBuffer: rawBuffer
-        };
-      }
+    } catch (parseErr) {
+      return {
+        success: true,
+        format: "pdf",
+        pdfBuffer: rawBuffer
+      };
     }
   } catch (err) {
     console.error("Error generating label from Delhivery:", err.message);
