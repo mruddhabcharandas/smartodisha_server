@@ -1334,7 +1334,7 @@ router.put("/products/:id", protect, async (req, res) => {
       return res.status(403).json({ error: "forbidden" });
     }
 
-    const allowed = ["name", "description", "highlights", "specifications", "price", "categoryId", "subCategoryId", "images", "stock", "weight", "length", "width", "height", "gst", "mrp", "isActive", "bulkDiscountQuantity", "bulkDiscountPriceReduction", "bulkTiers", "variants", "brandId", "minOrderQty", "section", "hsnCode", "sku", "packSize"];
+    const allowed = ["name", "description", "highlights", "specifications", "price", "categoryId", "subCategoryId", "images", "stock", "weight", "length", "width", "height", "gst", "mrp", "isActive", "bulkDiscountQuantity", "bulkDiscountPriceReduction", "bulkTiers", "variants", "brandId", "minOrderQty", "section", "hsnCode", "sku", "packSize", "attributes"];
     const payload = {};
     for (const k of allowed) if (k in req.body) payload[k] = req.body[k];
     if (payload.packSize !== undefined) payload.packSize = Number(payload.packSize || 1);
@@ -1372,7 +1372,7 @@ router.put("/products/:id", protect, async (req, res) => {
         .sort((a,b) => a.quantity - b.quantity);
     }
     if (Array.isArray(payload.attributes)) {
-      payload.attributes = payload.attributes.map(a => String(a || '').trim().toLowerCase()).filter(Boolean);
+      payload.attributes = payload.attributes.map(a => String(a || '').trim()).filter(Boolean);
     }
 
     if (payload.price !== undefined) {
@@ -1492,6 +1492,29 @@ router.put("/products/:id", protect, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to update product" });
+  }
+});
+
+// Dedicated endpoint to update product attributes/options
+router.put("/products/:id/attributes", protect, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+    const product = await Product.findOne({ _id: req.params.id, store: req.store._id });
+    if (!product) return res.status(404).json({ error: "not_found" });
+
+    const { attributes } = req.body || {};
+    if (!Array.isArray(attributes)) return res.status(400).json({ error: "attributes_must_be_array" });
+
+    product.attributes = attributes.map(a => String(a || '').trim()).filter(Boolean);
+    product.markModified("attributes");
+    await product.save();
+
+    await bumpCacheVersion("products:grouped");
+    await bumpCacheVersion("products:list");
+    res.json(product);
+  } catch (err) {
+    console.error("Failed to update attributes:", err);
+    res.status(500).json({ error: "Failed to update attributes" });
   }
 });
 
