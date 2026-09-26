@@ -251,53 +251,86 @@ const tryCreateDelhiveryShipment = async (order) => {
 };
 
 export const confirmAndFinalizeOrder = async (order, cashfreePaymentId, cashfreeSignature) => {
-  if (order.paymentStatus === "PAID") {
-    console.log("confirmAndFinalizeOrder: Order already paid:", order._id.toString());
-    return order;
+  const orderId = order?._id ? order._id.toString() : order.toString();
+
+  // Atomic lock on stockDeducted to guarantee single execution across concurrent webhooks and redirects
+  const lockedOrder = await Order.findOneAndUpdate(
+    { _id: orderId, stockDeducted: { $ne: true } },
+    {
+      $set: {
+        stockDeducted: true,
+        paymentStatus: order.paymentMethod === "COD" ? "PARTIAL_PAID" : "PAID",
+        status: "CONFIRMED",
+        ...(cashfreePaymentId ? { cashfreePaymentId } : {}),
+        ...(cashfreeSignature ? { cashfreeSignature } : {})
+      }
+    },
+    { new: true }
+  );
+
+  if (!lockedOrder) {
+    console.log("confirmAndFinalizeOrder: Order already finalized or stock already deducted:", orderId);
+    return (await Order.findById(orderId)) || order;
   }
 
-  console.log("=== confirmAndFinalizeOrder: Finalizing order ===", order._id.toString());
-  order.paymentStatus = "PAID";
-  order.status = "CONFIRMED";
-  if (cashfreePaymentId) order.cashfreePaymentId = cashfreePaymentId;
-  if (cashfreeSignature) order.cashfreeSignature = cashfreeSignature;
+  console.log("=== confirmAndFinalizeOrder: Finalizing order atomically ===", lockedOrder._id.toString());
 
-  // Decrement Stock
-  const uniqueIds = [...new Set(order.items.map(x => x.product.toString()))];
+  // Decrement Stock exactly ONCE
+  const uniqueIds = [...new Set((lockedOrder.items || []).map(x => x.product.toString()))];
   const products = await Product.find({ _id: { $in: uniqueIds } });
 
-  for (const it of order.items) {
+  for (const it of lockedOrder.items) {
     const qty = Number(it.quantity || 0);
+    if (qty <= 0) continue;
     const p = products.find(x => x._id.toString() === it.product.toString());
     if (p) {
+      let updatedVariant = false;
       if (it.variantSku) {
-        await Product.updateOne(
+        const res = await Product.updateOne(
           { _id: it.product, "variants.sku": String(it.variantSku) },
           { $inc: { "variants.$.stock": -qty } }
         );
-      } else {
+        if (res.modifiedCount > 0) updatedVariant = true;
+      }
+      if (!updatedVariant) {
         await Product.updateOne(
           { _id: it.product },
           { $inc: { stock: -qty } }
         );
       }
+
+      // Record Stock Transaction for inventory history & seller clarity
+      try {
+        await StockTxn.create({
+          product: it.product,
+          type: "ORDER",
+          quantity: -qty,
+          before: p.stock,
+          after: Math.max(0, p.stock - qty),
+          refType: "ORDER",
+          note: `Order #${lockedOrder.orderNumber || lockedOrder._id.toString().slice(-6).toUpperCase()}`,
+          variantSku: it.variantSku || ""
+        });
+      } catch (txnErr) {
+        console.error("Failed to record StockTxn:", txnErr);
+      }
     }
   }
 
-  // Update parent product stocks
+  // Update parent product stock summary from variant sums
   for (const id of uniqueIds) {
     const p = await Product.findById(id);
     if (p && p.variants && p.variants.length > 0) {
       const sum = p.variants.filter(v => v.isActive !== false).reduce((s, v) => s + (v.stock || 0), 0);
-      p.stock = sum;
+      p.stock = Math.max(0, sum);
       await p.save();
     }
   }
 
   // Update Coupon count if applied
-  if (order.couponCode) {
+  if (lockedOrder.couponCode) {
     try {
-      const coupon = await Coupon.findOne({ code: order.couponCode.toUpperCase() });
+      const coupon = await Coupon.findOne({ code: lockedOrder.couponCode.toUpperCase() });
       if (coupon) {
         coupon.usedCount = (coupon.usedCount || 0) + 1;
         await coupon.save();
@@ -306,6 +339,9 @@ export const confirmAndFinalizeOrder = async (order, cashfreePaymentId, cashfree
       console.error("Failed to increment coupon count:", err);
     }
   }
+
+  // Keep reference for downstream helpers
+  order = lockedOrder;
 
   // Create Bill
   try {
@@ -547,33 +583,6 @@ router.post("/", auth, requireRole("customer"), async (req, res) => {
     storeRevenue: Number(storeRevenue.toFixed(2)),
     adminRevenue: Number(adminRevenue.toFixed(2))
   });
-
-  if (couponId) {
-    await Coupon.findByIdAndUpdate(couponId, { $inc: { usedCount: 1 } });
-  }
-
-  for (const it of items) {
-    const qty = Number(it.quantity || 0);
-    if (it.variantSku) {
-      await Product.updateOne(
-        { _id: it.productId, "variants.sku": String(it.variantSku) },
-        { $inc: { "variants.$.stock": -qty } }
-      );
-    } else {
-      await Product.updateOne(
-        { _id: it.productId },
-        { $inc: { stock: -qty } }
-      );
-    }
-  }
-  for (const id of ids) {
-    const p = await Product.findById(id);
-    if (p && p.variants && p.variants.length > 0) {
-      const sum = p.variants.filter(v => v.isActive !== false).reduce((s, v) => s + (v.stock || 0), 0);
-      p.stock = sum;
-      await p.save();
-    }
-  }
 
   res.status(201).json({
     order: doc,
@@ -1209,31 +1218,48 @@ router.post("/:id/cancel", auth, requirePermission("orders"), async (req, res) =
     const refundAmount = Math.max(0, Math.round((amountPaid * 0.95) * 100) / 100);
     const deductionAmount = amountPaid - refundAmount;
     
-    // Restore stock
-    for (const item of order.items) {
-      const qty = item.quantity;
-      if (item.variantSku) {
-        await Product.updateOne(
-          { _id: item.product, "variants.sku": item.variantSku },
-          { $inc: { "variants.$.stock": qty } }
-        );
-      } else {
-        await Product.updateOne(
-          { _id: item.product },
-          { $inc: { stock: qty } }
-        );
+    // Restore stock if it was previously deducted
+    if (order.stockDeducted) {
+      for (const item of order.items) {
+        const qty = item.quantity;
+        let restoredVariant = false;
+        if (item.variantSku) {
+          const res = await Product.updateOne(
+            { _id: item.product, "variants.sku": item.variantSku },
+            { $inc: { "variants.$.stock": qty } }
+          );
+          if (res.modifiedCount > 0) restoredVariant = true;
+        }
+        if (!restoredVariant) {
+          await Product.updateOne(
+            { _id: item.product },
+            { $inc: { stock: qty } }
+          );
+        }
+
+        try {
+          await StockTxn.create({
+            product: item.product,
+            type: "RESTORE",
+            quantity: qty,
+            refType: "CANCEL",
+            note: `Order cancelled by admin #${order.orderNumber || order._id.toString().slice(-6).toUpperCase()}`,
+            variantSku: item.variantSku || ""
+          });
+        } catch (txnErr) {}
       }
-    }
-    
-    // Update product stock summary
-    const productIds = order.items.map(i => i.product.toString());
-    for (const id of productIds) {
-      const p = await Product.findById(id);
-      if (p && p.variants && p.variants.length > 0) {
-        const sum = p.variants.filter(v => v.isActive !== false).reduce((s, v) => s + (v.stock || 0), 0);
-        p.stock = sum;
-        await p.save();
+      
+      // Update product stock summary
+      const productIds = order.items.map(i => i.product.toString());
+      for (const id of productIds) {
+        const p = await Product.findById(id);
+        if (p && p.variants && p.variants.length > 0) {
+          const sum = p.variants.filter(v => v.isActive !== false).reduce((s, v) => s + (v.stock || 0), 0);
+          p.stock = sum;
+          await p.save();
+        }
       }
+      order.stockDeducted = false;
     }
     
     // Update order status and refund details
@@ -1343,31 +1369,48 @@ router.post("/:id/cancel-customer", auth, requireRole("customer"), async (req, r
       return res.status(400).json({ error: "cannot_cancel_shipped_order" });
     }
 
-    // Restore stock
-    for (const item of order.items) {
-      const qty = item.quantity;
-      if (item.variantSku) {
-        await Product.updateOne(
-          { _id: item.product, "variants.sku": item.variantSku },
-          { $inc: { "variants.$.stock": qty } }
-        );
-      } else {
-        await Product.updateOne(
-          { _id: item.product },
-          { $inc: { stock: qty } }
-        );
+    // Restore stock if it was previously deducted
+    if (order.stockDeducted) {
+      for (const item of order.items) {
+        const qty = item.quantity;
+        let restoredVariant = false;
+        if (item.variantSku) {
+          const res = await Product.updateOne(
+            { _id: item.product, "variants.sku": item.variantSku },
+            { $inc: { "variants.$.stock": qty } }
+          );
+          if (res.modifiedCount > 0) restoredVariant = true;
+        }
+        if (!restoredVariant) {
+          await Product.updateOne(
+            { _id: item.product },
+            { $inc: { stock: qty } }
+          );
+        }
+
+        try {
+          await StockTxn.create({
+            product: item.product,
+            type: "RESTORE",
+            quantity: qty,
+            refType: "CANCEL",
+            note: `Order cancelled by customer #${order.orderNumber || order._id.toString().slice(-6).toUpperCase()}`,
+            variantSku: item.variantSku || ""
+          });
+        } catch (txnErr) {}
       }
-    }
-    
-    // Update product stock summary
-    const productIds = order.items.map(i => i.product.toString());
-    for (const id of productIds) {
-      const p = await Product.findById(id);
-      if (p && p.variants && p.variants.length > 0) {
-        const sum = p.variants.filter(v => v.isActive !== false).reduce((s, v) => s + (v.stock || 0), 0);
-        p.stock = sum;
-        await p.save();
+      
+      // Update product stock summary
+      const productIds = order.items.map(i => i.product.toString());
+      for (const id of productIds) {
+        const p = await Product.findById(id);
+        if (p && p.variants && p.variants.length > 0) {
+          const sum = p.variants.filter(v => v.isActive !== false).reduce((s, v) => s + (v.stock || 0), 0);
+          p.stock = sum;
+          await p.save();
+        }
       }
+      order.stockDeducted = false;
     }
 
     order.status = "CANCELLED";

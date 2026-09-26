@@ -556,31 +556,48 @@ router.post("/orders/:id/cancel", protect, async (req, res) => {
       return res.status(400).json({ error: "cannot_cancel_shipped_order" });
     }
 
-    // Restore stock
-    for (const item of order.items) {
-      const qty = item.quantity;
-      if (item.variantSku) {
-        await Product.updateOne(
-          { _id: item.product, "variants.sku": item.variantSku },
-          { $inc: { "variants.$.stock": qty } }
-        );
-      } else {
-        await Product.updateOne(
-          { _id: item.product },
-          { $inc: { stock: qty } }
-        );
-      }
-    }
+    // Restore stock if it was previously deducted
+    if (order.stockDeducted) {
+      for (const item of order.items) {
+        const qty = item.quantity;
+        let restoredVariant = false;
+        if (item.variantSku) {
+          const res = await Product.updateOne(
+            { _id: item.product, "variants.sku": item.variantSku },
+            { $inc: { "variants.$.stock": qty } }
+          );
+          if (res.modifiedCount > 0) restoredVariant = true;
+        }
+        if (!restoredVariant) {
+          await Product.updateOne(
+            { _id: item.product },
+            { $inc: { stock: qty } }
+          );
+        }
 
-    // Update product stock summary
-    const productIds = order.items.map(i => i.product.toString());
-    for (const id of productIds) {
-      const p = await Product.findById(id);
-      if (p && p.variants && p.variants.length > 0) {
-        const sum = p.variants.filter(v => v.isActive !== false).reduce((s, v) => s + (v.stock || 0), 0);
-        p.stock = sum;
-        await p.save();
+        try {
+          await StockTxn.create({
+            product: item.product,
+            type: "RESTORE",
+            quantity: qty,
+            refType: "CANCEL",
+            note: `Order cancelled by store #${order.orderNumber || order._id.toString().slice(-6).toUpperCase()}`,
+            variantSku: item.variantSku || ""
+          });
+        } catch (txnErr) {}
       }
+
+      // Update product stock summary
+      const productIds = order.items.map(i => i.product.toString());
+      for (const id of productIds) {
+        const p = await Product.findById(id);
+        if (p && p.variants && p.variants.length > 0) {
+          const sum = p.variants.filter(v => v.isActive !== false).reduce((s, v) => s + (v.stock || 0), 0);
+          p.stock = sum;
+          await p.save();
+        }
+      }
+      order.stockDeducted = false;
     }
 
     order.status = "CANCELLED";
