@@ -1,38 +1,160 @@
 import axios from "axios";
-  
-async function getAccessToken() {
+
+// In-memory cache for Zoho OAuth token and account details
+let cachedZoho = {
+  token: null,
+  tokenExpiresAt: 0,
+  accountId: null,
+  primaryAddress: null
+};
+
+export const extractCleanEmail = (raw) => {
+  if (!raw) return "";
+  const match = String(raw).match(/<([^>]+)>/);
+  return (match ? match[1] : String(raw)).trim();
+};
+
+export async function getAccessToken() {
+  const now = Date.now();
+  if (cachedZoho.token && cachedZoho.tokenExpiresAt > now) {
+    return cachedZoho.token;
+  }
+
   const domain = (process.env.ZOHO_DOMAIN || "in").toLowerCase();
-  const res = await axios.post(`https://accounts.zoho.${domain}/oauth/v2/token`, null, {
-    params: {
-      refresh_token: process.env.ZOHO_REFRESH_TOKEN,
-      client_id: process.env.ZOHO_CLIENT_ID,
-      client_secret: process.env.ZOHO_CLIENT_SECRET,
-      grant_type: "refresh_token"
+  const refreshToken = (process.env.ZOHO_REFRESH_TOKEN || "").trim();
+  const clientId = (process.env.ZOHO_CLIENT_ID || "").trim();
+  const clientSecret = (process.env.ZOHO_CLIENT_SECRET || "").trim();
+
+  if (!refreshToken || !clientId || !clientSecret) {
+    throw new Error(
+      `Zoho credentials missing in environment: refresh_token=${!!refreshToken}, client_id=${!!clientId}, client_secret=${!!clientSecret}`
+    );
+  }
+
+  try {
+    const res = await axios.post(`https://accounts.zoho.${domain}/oauth/v2/token`, null, {
+      params: {
+        refresh_token: refreshToken,
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: "refresh_token"
+      }
+    });
+
+    if (!res.data?.access_token) {
+      throw new Error(`Zoho token error: ${JSON.stringify(res.data)}`);
     }
-  });
-  return res.data.access_token;
+
+    cachedZoho.token = res.data.access_token;
+    const expiresIn = Number(res.data.expires_in) || 3600;
+    cachedZoho.tokenExpiresAt = now + Math.max(300, expiresIn - 300) * 1000;
+    return cachedZoho.token;
+  } catch (err) {
+    const detail = err?.response?.data || err.message;
+    console.error("Zoho OAuth Token fetch failed:", detail);
+    throw new Error(`Zoho OAuth failed: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+  }
 }
 
-export const sendEmail = async ({ to, subject, text, html }) => {
-  const content = html || (text ? `<pre>${text}</pre>` : "");
-  try {
-    const domain = (process.env.ZOHO_DOMAIN || "in").toLowerCase();
-    const accessToken = await getAccessToken();
-    await axios.post(
-      `https://mail.zoho.${domain}/api/accounts/${process.env.ZOHO_ACCOUNT_ID}/messages`,
-      {
-        fromAddress: `${process.env.MAIL_FROM_NAME || process.env.COMPANY_NAME || "SmartOdisha"} <${process.env.ZOHO_MAIL_FROM}>`,
-        toAddress: to,
-        subject,
-        content
-      },
-      {
+export async function getZohoAccountInfo() {
+  const domain = (process.env.ZOHO_DOMAIN || "in").toLowerCase();
+  const accessToken = await getAccessToken();
+
+  let accountId = (process.env.ZOHO_ACCOUNT_ID || cachedZoho.accountId || "").toString().trim();
+  let primaryAddress = extractCleanEmail(process.env.ZOHO_MAIL_FROM || cachedZoho.primaryAddress || "");
+
+  // Auto-discover accountId or primaryAddress if missing
+  if (!accountId || !primaryAddress) {
+    try {
+      const accRes = await axios.get(`https://mail.zoho.${domain}/api/accounts`, {
         headers: {
           Authorization: `Zoho-oauthtoken ${accessToken}`
         }
+      });
+      const list = accRes.data?.data;
+      if (Array.isArray(list) && list.length > 0) {
+        if (!accountId) {
+          accountId = String(list[0].accountId || "").trim();
+        }
+        if (!primaryAddress) {
+          primaryAddress = String(list[0].primaryAddress || list[0].incomingUserName || list[0].mailboxAddress || "").trim();
+        }
       }
+    } catch (e) {
+      console.warn("Zoho accounts auto-discovery notice:", e?.response?.data || e.message);
+    }
+  }
+
+  cachedZoho.accountId = accountId;
+  cachedZoho.primaryAddress = primaryAddress;
+
+  return { accountId, primaryAddress, domain, accessToken };
+}
+
+export const sendEmail = async ({ to, subject, text, html, from }) => {
+  const content = html || (text ? `<pre>${text}</pre>` : "");
+  try {
+    const { accountId, primaryAddress, domain, accessToken } = await getZohoAccountInfo();
+
+    if (!accountId) {
+      throw new Error("Zoho Account ID is missing. Please set ZOHO_ACCOUNT_ID in environment or verify Zoho credentials.");
+    }
+
+    // Default sender is ALWAYS noreply as required
+    const targetNoreply = extractCleanEmail(
+      from ||
+      process.env.NOREPLY_EMAIL ||
+      process.env.ZOHO_NOREPLY_EMAIL ||
+      "noreply@smartodisha.in"
     );
-    return { sent: true };
+
+    const payload = {
+      fromAddress: targetNoreply,
+      toAddress: to,
+      subject,
+      content,
+      mailFormat: "html"
+    };
+
+    try {
+      const res = await axios.post(
+        `https://mail.zoho.${domain}/api/accounts/${accountId}/messages`,
+        payload,
+        {
+          headers: {
+            Authorization: `Zoho-oauthtoken ${accessToken}`,
+            "Content-Type": "application/json"
+          }
+        }
+      );
+      return { sent: true, data: res.data };
+    } catch (sendErr) {
+      // If Zoho returns INVALID_FROM_ADDRESS because "noreply@" hasn't been added as an alias in Zoho Mail admin panel yet,
+      // fallback to the verified primaryAddress so the email never fails!
+      const errData = sendErr?.response?.data;
+      const isInvalidFrom = errData && (
+        errData.code === "INVALID_FROM_ADDRESS" || 
+        errData.status?.code === 400 || 
+        JSON.stringify(errData).toLowerCase().includes("from address")
+      );
+
+      if (isInvalidFrom && primaryAddress && targetNoreply !== primaryAddress) {
+        console.warn(`[Zoho Mailer] '${targetNoreply}' is not an authorized alias in Zoho. Retrying with primary address: '${primaryAddress}'`);
+        payload.fromAddress = primaryAddress;
+        const retryRes = await axios.post(
+          `https://mail.zoho.${domain}/api/accounts/${accountId}/messages`,
+          payload,
+          {
+            headers: {
+              Authorization: `Zoho-oauthtoken ${accessToken}`,
+              "Content-Type": "application/json"
+            }
+          }
+        );
+        return { sent: true, data: retryRes.data, fallbackUsed: true };
+      }
+      throw sendErr;
+    }
   } catch (err) {
     const detail = err?.response?.data || err.message;
     console.error("Email sending failed:", detail);
@@ -43,7 +165,8 @@ export const sendEmail = async ({ to, subject, text, html }) => {
 const COMPANY_NAME = process.env.COMPANY_NAME || "SmartOdisha";
 const LOGO_URL = process.env.LOGO_URL || "https://smartodisha.in/logo.png";
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://smartodisha.in";
-const SUPPORT_EMAIL = process.env.ZOHO_MAIL_FROM || "support@smartodisha.in";
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || process.env.ZOHO_MAIL_FROM || "support@smartodisha.in";
+const NOREPLY_EMAIL = process.env.NOREPLY_EMAIL || process.env.ZOHO_NOREPLY_EMAIL || "noreply@smartodisha.in";
 
 /**
  * Helper to build the Master Luxury Email Wrapper
@@ -133,11 +256,14 @@ const buildEmailWrapper = ({ previewText = "", badgeText = "", badgeColor = "#4f
           <!-- Footer Area -->
           <tr>
             <td class="footer-area">
+              <p style="margin:0 0 6px; color:#94a3b8; font-size:11px; font-weight:600;">
+                Please do not reply directly to this email. This is an automated notification from a no-reply address.
+              </p>
               <p style="margin:0 0 8px; color:#64748b; font-weight:600;">
-                Questions? Email us anytime at <a href="mailto:${SUPPORT_EMAIL}" style="color:#4f46e5; text-decoration:none; font-weight:700;">${SUPPORT_EMAIL}</a>
+                For inquiries or assistance, write to <a href="mailto:${SUPPORT_EMAIL}" style="color:#4f46e5; text-decoration:none; font-weight:700;">${SUPPORT_EMAIL}</a>
               </p>
               <p style="margin:0 0 12px; color:#94a3b8; font-size:11px;">
-                You received this email because you are a registered user of ${COMPANY_NAME}.
+                You received this transactional message because you are a registered user/merchant of ${COMPANY_NAME}.
               </p>
               <div style="font-size:11px; color:#cbd5e1; font-weight:700; letter-spacing:0.08em; text-transform:uppercase;">
                 © ${year} ${COMPANY_NAME}. ALL RIGHTS RESERVED.
@@ -568,6 +694,66 @@ export const sendCustomerOrderStatusUpdateEmail = async (order, targetStatus, cu
   let statusCardContent = "";
 
   switch (targetStatus) {
+    case "CONFIRMED":
+      subject = `🎉 Order Confirmed! SmartOdisha #${orderNum}`;
+      badgeText = "ORDER CONFIRMED 🎉";
+      badgeColor = "#16a34a";
+      badgeBg = "#f0fdf4";
+      heading = "Your Order is Confirmed!";
+      subheading = `Thank you, ${customerName}! Your order #${orderNum} has been confirmed and the seller is preparing your package.`;
+      ctaText = "View Order Details 📄";
+      ctaUrl = `${FRONTEND_URL}/order-history`;
+
+      statusCardContent = `
+        <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:18px; padding:20px; margin-bottom:24px;">
+          <div style="font-size:14px; font-weight:800; color:#166534; margin-bottom:4px;">✅ Order Verified & Assigned</div>
+          <div style="font-size:12px; color:#15803d; line-height:1.5;">
+            The seller has accepted your order and our fulfillment team has scheduled Delhivery logistics for shipment.
+          </div>
+        </div>
+      `;
+      break;
+
+    case "PROCESSING":
+      subject = `⚙️ Preparing Your Order: SmartOdisha #${orderNum}`;
+      badgeText = "ORDER PROCESSING ⚙️";
+      badgeColor = "#4f46e5";
+      badgeBg = "#eef2ff";
+      heading = "Your Items are Being Prepared";
+      subheading = `Hi ${customerName}, the seller has started picking and quality-checking your items for order #${orderNum}.`;
+      ctaText = "View Order Status 🔍";
+      ctaUrl = `${FRONTEND_URL}/order-history`;
+
+      statusCardContent = `
+        <div style="background:#eef2ff; border:1px solid #c7d2fe; border-radius:18px; padding:20px; margin-bottom:24px;">
+          <div style="font-size:14px; font-weight:800; color:#4338ca; margin-bottom:4px;">🔍 Assembly & Quality Inspection</div>
+          <div style="font-size:12px; color:#3730a3; line-height:1.5;">
+            Your items are undergoing authentic quality inspection prior to packaging. We'll alert you the moment they are boxed!
+          </div>
+        </div>
+      `;
+      break;
+
+    case "PACKED":
+      subject = `📦 Order Packed & Ready! SmartOdisha #${orderNum}`;
+      badgeText = "PACKED & READY 📦";
+      badgeColor = "#0891b2";
+      badgeBg = "#ecfeff";
+      heading = "Your Package is Packed!";
+      subheading = `Great news, ${customerName}! Your order #${orderNum} is safely packed and waiting for Delhivery courier pickup.`;
+      ctaText = "Track Order 🚚";
+      ctaUrl = `${FRONTEND_URL}/order-history`;
+
+      statusCardContent = `
+        <div style="background:#ecfeff; border:1px solid #a5f3fc; border-radius:18px; padding:20px; margin-bottom:24px;">
+          <div style="font-size:14px; font-weight:800; color:#155e75; margin-bottom:4px;">📦 Sealed and Ready for Courier Handover</div>
+          <div style="font-size:12px; color:#0e7490; line-height:1.5;">
+            The shipping label with barcode has been attached. The Delhivery dispatch executive will pick up your parcel shortly.
+          </div>
+        </div>
+      `;
+      break;
+
     case "SHIPPED":
       subject = `🚚 Order Dispatched! SmartOdisha #${orderNum} is on the way`;
       badgeText = "DISPATCHED & IN TRANSIT 🚚";
@@ -634,6 +820,26 @@ export const sendCustomerOrderStatusUpdateEmail = async (order, targetStatus, cu
           <div style="font-size:36px; margin-bottom:8px;">🎁</div>
           <div style="font-size:15px; font-weight:900; color:#166534; margin-bottom:4px;">Delivered by Delhivery Express</div>
           <div style="font-size:12px; color:#15803d;">We would love to hear your feedback on the products you received!</div>
+        </div>
+      `;
+      break;
+
+    case "RETURNED":
+      subject = `↩️ Return Processed: SmartOdisha #${orderNum}`;
+      badgeText = "RETURN PROCESSED ↩️";
+      badgeColor = "#64748b";
+      badgeBg = "#f1f5f9";
+      heading = "Return Package Received";
+      subheading = `Your returned parcel for order #${orderNum} has been received back at the facility.`;
+      ctaText = "Contact Support 💬";
+      ctaUrl = `${FRONTEND_URL}/order-history`;
+
+      statusCardContent = `
+        <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:18px; padding:20px; margin-bottom:24px;">
+          <div style="font-size:14px; font-weight:800; color:#334155; margin-bottom:4px;">📦 Return Received & Checked</div>
+          <div style="font-size:12px; color:#475569; line-height:1.5;">
+            The items have been verified upon return. Any applicable refunds or wallet credits are being processed per policy.
+          </div>
         </div>
       `;
       break;
@@ -852,4 +1058,290 @@ export const sendPasswordResetEmail = async (email, name, resetUrl) => {
   });
 
   return sendEmail({ to: email, subject, html });
+};
+
+/**
+ * 9. Seller Payout Processed Email (Detailed disbursement statement)
+ */
+export const sendSellerPayoutProcessedEmail = async ({
+  sellerEmail,
+  sellerName = "Seller Partner",
+  amount,
+  referenceId = "",
+  note = "",
+  remainingPending = 0,
+  totalPaid = 0,
+  bankDetails = null,
+  upiId = ""
+}) => {
+  if (!sellerEmail) return;
+
+  const formattedAmount = Number(amount || 0).toLocaleString("en-IN");
+  const formattedPending = Number(remainingPending || 0).toLocaleString("en-IN");
+  const formattedTotalPaid = Number(totalPaid || 0).toLocaleString("en-IN");
+  const dateStr = new Date().toLocaleDateString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+
+  const subject = `💰 Payout Disbursed: ₹${formattedAmount} Transferred - ${COMPANY_NAME}`;
+
+  let accountDestHtml = "";
+  if (upiId && upiId.trim()) {
+    accountDestHtml = `
+      <div style="font-size:12px; font-weight:700; color:#0f172a;">UPI ID: <span style="font-family:monospace; color:#4f46e5;">${upiId.trim()}</span></div>
+    `;
+  } else if (bankDetails && (bankDetails.accountNumber || bankDetails.accountName)) {
+    const maskedAcc = bankDetails.accountNumber ? `•••• ${String(bankDetails.accountNumber).slice(-4)}` : "Registered Bank Account";
+    accountDestHtml = `
+      <div style="font-size:12px; font-weight:700; color:#0f172a;">${bankDetails.bankName || "Bank Transfer"} (${maskedAcc})</div>
+      ${bankDetails.ifscCode ? `<div style="font-size:11px; color:#64748b; font-family:monospace;">IFSC: ${bankDetails.ifscCode}</div>` : ""}
+    `;
+  } else {
+    accountDestHtml = `<div style="font-size:12px; font-weight:700; color:#0f172a;">Registered Merchant Settlement Account</div>`;
+  }
+
+  const bodyHtml = `
+    <!-- Large Disbursement Banner -->
+    <div style="background:linear-gradient(135deg, #064e3b 0%, #047857 60%, #10b981 100%); border-radius:20px; padding:26px; margin-bottom:24px; color:#ffffff; text-align:center;">
+      <div style="font-size:11px; font-weight:800; letter-spacing:0.18em; text-transform:uppercase; color:#a7f3d0; margin-bottom:4px;">Disbursement Amount</div>
+      <div style="font-size:36px; font-weight:900; color:#ffffff; letter-spacing:-0.02em;">₹${formattedAmount}</div>
+      <div style="font-size:12px; color:#d1fae5; font-weight:600; margin-top:4px;">✅ Successfully Processed by SmartOdisha Finance</div>
+    </div>
+
+    <!-- Payout Breakdown Details -->
+    <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:18px; padding:22px; margin-bottom:24px;">
+      <div style="font-size:11px; font-weight:800; letter-spacing:0.12em; text-transform:uppercase; color:#64748b; margin-bottom:14px; border-bottom:1px solid #f1f5f9; padding-bottom:8px;">Payout Breakdown & Transfer Details</div>
+      
+      <table width="100%" cellpadding="0" cellspacing="0" border="0">
+        <tr>
+          <td style="padding:8px 0; border-bottom:1px solid #f8fafc; font-size:12px; color:#64748b; font-weight:600;">Transaction / UTR Reference</td>
+          <td align="right" style="padding:8px 0; border-bottom:1px solid #f8fafc; font-size:13px; color:#0f172a; font-weight:800; font-family:monospace;">
+            ${referenceId ? referenceId : "Direct Settlement"}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:8px 0; border-bottom:1px solid #f8fafc; font-size:12px; color:#64748b; font-weight:600;">Disbursement Date</td>
+          <td align="right" style="padding:8px 0; border-bottom:1px solid #f8fafc; font-size:12px; color:#0f172a; font-weight:700;">
+            ${dateStr}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:8px 0; border-bottom:1px solid #f8fafc; font-size:12px; color:#64748b; font-weight:600;">Settlement Destination</td>
+          <td align="right" style="padding:8px 0; border-bottom:1px solid #f8fafc;">
+            ${accountDestHtml}
+          </td>
+        </tr>
+        ${note ? `
+        <tr>
+          <td style="padding:8px 0; border-bottom:1px solid #f8fafc; font-size:12px; color:#64748b; font-weight:600;">Admin Remarks / Note</td>
+          <td align="right" style="padding:8px 0; border-bottom:1px solid #f8fafc; font-size:12px; color:#0f172a; font-weight:600; max-width:260px;">
+            ${note}
+          </td>
+        </tr>
+        ` : ""}
+      </table>
+    </div>
+
+    <!-- Wallet Balance Status After Payout -->
+    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;">
+      <tr>
+        <td width="50%" style="padding-right:8px;">
+          <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:16px; padding:16px; text-align:center;">
+            <div style="font-size:10px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em;">Remaining Pending Wallet</div>
+            <div style="font-size:18px; font-weight:900; color:#0f172a; margin-top:4px;">₹${formattedPending}</div>
+          </div>
+        </td>
+        <td width="50%" style="padding-left:8px;">
+          <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:16px; padding:16px; text-align:center;">
+            <div style="font-size:10px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em;">Total Disbursed to Date</div>
+            <div style="font-size:18px; font-weight:900; color:#16a34a; margin-top:4px;">₹${formattedTotalPaid}</div>
+          </div>
+        </td>
+      </tr>
+    </table>
+
+    <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:16px; padding:14px 18px; font-size:12px; color:#166534; line-height:1.6;">
+      ℹ️ <strong>Settlement Clearing Notice:</strong> The transfer has been authorized by our finance desk. For IMPS/UPI transfers, funds usually reflect instantly. For NEFT/RTGS, please allow 2 to 24 bank working hours.
+    </div>
+  `;
+
+  const html = buildEmailWrapper({
+    previewText: `SmartOdisha Payout Processed: ₹${formattedAmount} disbursed to your seller account.`,
+    badgeText: "PAYOUT DISBURSED 💰",
+    badgeColor: "#16a34a",
+    badgeBg: "#f0fdf4",
+    heading: `Payout Initiated: ₹${formattedAmount}`,
+    subheading: `Hi ${sellerName}, your vendor payout has been released. Full breakdown below.`,
+    bodyHtml,
+    ctaText: "View Earnings & Statements 📊",
+    ctaUrl: `${FRONTEND_URL}/business/earnings`
+  });
+
+  return sendEmail({ to: sellerEmail, subject, html });
+};
+
+/**
+ * 10. Seller Wallet Deduction Alert Email
+ */
+export const sendSellerWalletDeductionEmail = async ({
+  sellerEmail,
+  sellerName = "Seller Partner",
+  amount,
+  note = "",
+  remainingPending = 0,
+  proofImage = "",
+  transactionId = ""
+}) => {
+  if (!sellerEmail) return;
+
+  const formattedAmount = Number(amount || 0).toLocaleString("en-IN");
+  const formattedPending = Number(remainingPending || 0).toLocaleString("en-IN");
+  const dateStr = new Date().toLocaleDateString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+
+  const subject = `⚠️ Notice: Wallet Deduction of ₹${formattedAmount} Applied - ${COMPANY_NAME}`;
+
+  const bodyHtml = `
+    <!-- Deduction Alert Card -->
+    <div style="background:linear-gradient(135deg, #7f1d1d 0%, #991b1b 60%, #b91c1c 100%); border-radius:20px; padding:26px; margin-bottom:24px; color:#ffffff; text-align:center;">
+      <div style="font-size:11px; font-weight:800; letter-spacing:0.18em; text-transform:uppercase; color:#fca5a5; margin-bottom:4px;">Deduction / Adjustment</div>
+      <div style="font-size:36px; font-weight:900; color:#ffffff; letter-spacing:-0.02em;">-₹${formattedAmount}</div>
+      <div style="font-size:12px; color:#fecaca; font-weight:600; margin-top:4px;">Adjusted from your Pending Wallet Balance</div>
+    </div>
+
+    <!-- Reason & Deduction Audit Details -->
+    <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:18px; padding:22px; margin-bottom:24px;">
+      <div style="font-size:11px; font-weight:800; letter-spacing:0.12em; text-transform:uppercase; color:#64748b; margin-bottom:14px; border-bottom:1px solid #f1f5f9; padding-bottom:8px;">Adjustment Breakdown</div>
+      
+      <table width="100%" cellpadding="0" cellspacing="0" border="0">
+        <tr>
+          <td style="padding:8px 0; border-bottom:1px solid #f8fafc; font-size:12px; color:#64748b; font-weight:600;">Reason / Remark</td>
+          <td align="right" style="padding:8px 0; border-bottom:1px solid #f8fafc; font-size:13px; color:#991b1b; font-weight:800;">
+            ${note || "Admin Adjustment / Return Fee / Penalty"}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:8px 0; border-bottom:1px solid #f8fafc; font-size:12px; color:#64748b; font-weight:600;">Adjustment Date</td>
+          <td align="right" style="padding:8px 0; border-bottom:1px solid #f8fafc; font-size:12px; color:#0f172a; font-weight:700;">
+            ${dateStr}
+          </td>
+        </tr>
+        ${transactionId ? `
+        <tr>
+          <td style="padding:8px 0; border-bottom:1px solid #f8fafc; font-size:12px; color:#64748b; font-weight:600;">Audit Transaction ID</td>
+          <td align="right" style="padding:8px 0; border-bottom:1px solid #f8fafc; font-size:12px; color:#0f172a; font-family:monospace; font-weight:700;">
+            ${transactionId}
+          </td>
+        </tr>
+        ` : ""}
+        <tr>
+          <td style="padding:8px 0; font-size:12px; color:#64748b; font-weight:600;">Updated Pending Balance</td>
+          <td align="right" style="padding:8px 0; font-size:14px; color:#0f172a; font-weight:900;">
+            ₹${formattedPending}
+          </td>
+        </tr>
+      </table>
+
+      ${proofImage ? `
+        <div style="margin-top:16px; padding-top:16px; border-top:1px solid #f1f5f9;">
+          <div style="font-size:11px; font-weight:800; color:#64748b; text-transform:uppercase; margin-bottom:8px;">Attached Documentation:</div>
+          <a href="${proofImage}" target="_blank" style="display:inline-block; border-radius:10px; overflow:hidden; border:1px solid #e2e8f0; text-decoration:none;">
+            <img src="${proofImage}" alt="Deduction Proof" style="max-height:160px; max-width:100%; object-fit:cover; display:block;" />
+            <div style="padding:6px 10px; background:#f8fafc; font-size:11px; font-weight:700; color:#4f46e5; text-align:center;">Click to inspect proof document ↗</div>
+          </a>
+        </div>
+      ` : ""}
+    </div>
+
+    <!-- Dispute / Help Notice -->
+    <div style="background:#fef2f2; border:1px solid #fecaca; border-radius:16px; padding:16px; font-size:12px; color:#991b1b; line-height:1.6;">
+      ⚖️ <strong>Dispute or Inquiry:</strong> If you believe this deduction was made in error or requires clarification, please raise a ticket directly through your <strong>Seller Support Center</strong> or reply to your merchant manager.
+    </div>
+  `;
+
+  const html = buildEmailWrapper({
+    previewText: `Notice: Wallet adjustment of -₹${formattedAmount} applied to your seller account.`,
+    badgeText: "WALLET ADJUSTMENT ⚠️",
+    badgeColor: "#dc2626",
+    badgeBg: "#fef2f2",
+    heading: `Wallet Adjustment: -₹${formattedAmount}`,
+    subheading: `Hi ${sellerName}, an adjustment has been made to your pending balance. Details are provided below.`,
+    bodyHtml,
+    ctaText: "Check Wallet Balance 💼",
+    ctaUrl: `${FRONTEND_URL}/business/earnings`
+  });
+
+  return sendEmail({ to: sellerEmail, subject, html });
+};
+
+/**
+ * 11. Seller Order Cancelled Alert Email
+ */
+export const sendSellerOrderCancelledAlertEmail = async (sellerEmail, sellerName = "Seller Partner", order, reason = "") => {
+  if (!sellerEmail || !order) return;
+
+  const orderNum = order.orderNumber || String(order._id).slice(-8).toUpperCase();
+  const subject = `🚫 Cancelled: Order #${orderNum} Has Been Cancelled - Do Not Dispatch`;
+
+  const itemsRows = (order.items || []).map(it => `
+    <tr>
+      <td style="padding:8px 0; border-bottom:1px solid #f1f5f9; font-size:13px; font-weight:700; color:#0f172a;">
+        ${it.name}
+      </td>
+      <td align="center" style="padding:8px 0; border-bottom:1px solid #f1f5f9; font-size:13px; font-weight:800; color:#991b1b;">
+        ${it.quantity}
+      </td>
+    </tr>
+  `).join("");
+
+  const bodyHtml = `
+    <div style="background:#fef2f2; border:1px solid #fecaca; border-radius:18px; padding:20px; margin-bottom:24px;">
+      <div style="font-size:14px; font-weight:800; color:#991b1b; margin-bottom:4px;">Notice: Order Cancelled</div>
+      <div style="font-size:13px; color:#7f1d1d; line-height:1.5;">
+        Order <strong>#${orderNum}</strong> has been cancelled. 
+        <br/><br/>
+        ⚠️ <strong>Do NOT pack or hand over this parcel to the Delhivery courier executive.</strong>
+      </div>
+      ${reason ? `
+        <div style="margin-top:12px; padding-top:12px; border-top:1px solid #fee2e2; font-size:12px; color:#991b1b;">
+          <strong>Reason:</strong> ${reason}
+        </div>
+      ` : ""}
+    </div>
+
+    <!-- Items List -->
+    <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:18px; padding:18px 20px; margin-bottom:24px;">
+      <div style="font-size:11px; font-weight:800; letter-spacing:0.12em; text-transform:uppercase; color:#64748b; margin-bottom:10px;">Cancelled Order Items (Stock Restored):</div>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0">
+        ${itemsRows}
+      </table>
+    </div>
+
+    <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:14px; padding:14px; font-size:12px; color:#64748b;">
+      ✅ The stock for these items has been automatically restored to your active inventory.
+    </div>
+  `;
+
+  const html = buildEmailWrapper({
+    previewText: `Order #${orderNum} has been cancelled. Please do not dispatch this package.`,
+    badgeText: "ORDER CANCELLED 🚫",
+    badgeColor: "#dc2626",
+    badgeBg: "#fef2f2",
+    heading: `Order #${orderNum} Cancelled`,
+    subheading: `Hi ${sellerName}, please halt packaging and dispatch for this order.`,
+    bodyHtml,
+    ctaText: "Open Seller Orders 📦",
+    ctaUrl: `${FRONTEND_URL}/business/orders`
+  });
+
+  return sendEmail({ to: sellerEmail, subject, html });
 };

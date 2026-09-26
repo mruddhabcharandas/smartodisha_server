@@ -16,7 +16,7 @@ import { computeTotals } from "../lib/invoice.js";
 import cashfree from "../lib/cashfree.js";
 import crypto from "crypto";
 import { createBillFromData } from "../lib/billing.js";
-import { sendEmail, renderMail, sendCustomerOrderConfirmationEmail, sendSellerNewOrderAlertEmail, sendCustomerOrderStatusUpdateEmail } from "../lib/mailer.js";
+import { sendEmail, renderMail, sendCustomerOrderConfirmationEmail, sendSellerNewOrderAlertEmail, sendCustomerOrderStatusUpdateEmail, sendSellerOrderCancelledAlertEmail } from "../lib/mailer.js";
 import AuditLog from "../models/AuditLog.js";
 import { notifyAdmin } from "../lib/socket.js";
 import SellerTransaction from "../models/SellerTransaction.js";
@@ -1328,6 +1328,15 @@ router.post("/:id/cancel", auth, requirePermission("orders"), async (req, res) =
       sendCustomerOrderStatusUpdateEmail(order, "CANCELLED", { reason: reason || "Order cancelled by admin" }).catch(err => {
         console.warn("Failed to send cancellation email:", err?.message || err);
       });
+
+      // Send cancellation alert to seller
+      if (order.store) {
+        Store.findById(order.store).then(storeObj => {
+          if (storeObj && storeObj.email) {
+            sendSellerOrderCancelledAlertEmail(storeObj.email, storeObj.name, order, reason || "Order cancelled by admin").catch(() => {});
+          }
+        }).catch(() => {});
+      }
       
       res.json({
         success: true,
@@ -1503,6 +1512,15 @@ router.post("/:id/cancel-customer", auth, requireRole("customer"), async (req, r
       console.warn("Failed to send customer self-cancellation email:", err?.message || err);
     });
 
+    // Send cancellation alert to seller
+    if (order.store) {
+      Store.findById(order.store).then(storeObj => {
+        if (storeObj && storeObj.email) {
+          sendSellerOrderCancelledAlertEmail(storeObj.email, storeObj.name, order, reason || "Cancelled by customer").catch(() => {});
+        }
+      }).catch(() => {});
+    }
+
     res.json({
       success: true,
       message: "Order cancelled successfully",
@@ -1610,6 +1628,20 @@ router.patch("/:id/status", auth, requirePermission("orders"), async (req, res) 
       note: `Status updated to ${req.body.status}`
     });
 
+    // Notify customer on status update
+    sendCustomerOrderStatusUpdateEmail(order, req.body.status).catch(err => {
+      console.warn("Failed to send status update email from admin:", err?.message || err);
+    });
+
+    // If status is CANCELLED, alert seller not to dispatch
+    if (req.body.status === "CANCELLED" && order.store) {
+      Store.findById(order.store).then(storeObj => {
+        if (storeObj && storeObj.email) {
+          sendSellerOrderCancelledAlertEmail(storeObj.email, storeObj.name, order, "Cancelled by administrator").catch(() => {});
+        }
+      }).catch(() => {});
+    }
+
     res.json(order);
   } catch (err) {
     res.status(500).json({ error: "status_update_failed" });
@@ -1633,6 +1665,10 @@ router.patch("/:id/pack", auth, requirePermission("orders"), async (req, res) =>
       entityType: "ORDER",
       entityId: order._id.toString(),
       note: "Order marked as Packed"
+    });
+
+    sendCustomerOrderStatusUpdateEmail(order, "PACKED").catch(err => {
+      console.warn("Failed to send packed email from admin:", err?.message || err);
     });
 
     res.json(order);
@@ -1669,6 +1705,10 @@ router.patch("/:id/deliver", auth, requirePermission("orders"), async (req, res)
       entityType: "ORDER",
       entityId: order._id.toString(),
       note: "Order marked as Delivered"
+    });
+
+    sendCustomerOrderStatusUpdateEmail(order, "DELIVERED").catch(err => {
+      console.warn("Failed to send delivered email from admin:", err?.message || err);
     });
 
     res.json(order);

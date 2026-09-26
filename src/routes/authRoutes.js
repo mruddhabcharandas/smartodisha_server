@@ -331,6 +331,11 @@ router.post("/customer/google/signup", async (req, res) => {
       isActive: true
     });
 
+    // Send luxury welcome email
+    sendUserWelcomeEmail(customer.email, customer.name).catch(err => {
+      console.warn("Failed to send welcome email for Google signup:", err?.message || err);
+    });
+
     const token = jwt.sign(
       { id: customer._id.toString(), role: "customer", email: customer.email },
       process.env.JWT_SECRET,

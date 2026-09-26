@@ -2,6 +2,7 @@ import express from "express";
 import Store from "../models/Store.js";
 import SellerTransaction from "../models/SellerTransaction.js";
 import { auth, requireRole, requirePermission } from "../middleware/auth.js";
+import { sendSellerPayoutProcessedEmail, sendSellerWalletDeductionEmail } from "../lib/mailer.js";
 import mongoose from "mongoose";
 
 const router = express.Router();
@@ -45,6 +46,23 @@ router.post("/pay", auth, requirePermission("orders"), async (req, res) => {
       note: note || "Payout from Admin"
     });
 
+    // Send detailed luxury payout email to seller
+    if (store.email) {
+      sendSellerPayoutProcessedEmail({
+        sellerEmail: store.email,
+        sellerName: store.name,
+        amount: payoutAmount,
+        referenceId: referenceId || "",
+        note: note || "",
+        remainingPending: store.walletPending,
+        totalPaid: store.walletPaid,
+        bankDetails: store.bankDetails,
+        upiId: store.upiId
+      }).catch(mailErr => {
+        console.warn("Failed to send seller payout email:", mailErr?.message || mailErr);
+      });
+    }
+
     res.json({ success: true, message: "Payout processed successfully", transaction: tx, store });
   } catch (err) {
     console.error("Process payout failed:", err);
@@ -78,6 +96,21 @@ router.post("/deduct", auth, requirePermission("orders"), async (req, res) => {
       note: note || "Wallet deduction by Admin",
       proofImage: proofImage || ""
     });
+
+    // Send detailed luxury wallet deduction email to seller
+    if (store.email) {
+      sendSellerWalletDeductionEmail({
+        sellerEmail: store.email,
+        sellerName: store.name,
+        amount: deductAmount,
+        note: note || "",
+        remainingPending: store.walletPending,
+        proofImage: proofImage || "",
+        transactionId: tx._id.toString()
+      }).catch(mailErr => {
+        console.warn("Failed to send seller deduction email:", mailErr?.message || mailErr);
+      });
+    }
 
     res.json({ success: true, message: "Deduction processed successfully", transaction: tx, store });
   } catch (err) {

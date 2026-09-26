@@ -635,11 +635,10 @@ router.patch("/orders/:id/status", protect, async (req, res) => {
       note: `Status updated by store to ${req.body.status}`
     });
 
-    if (["SHIPPED", "OUT_FOR_DELIVERY", "DELIVERED", "CANCELLED"].includes(req.body.status)) {
-      sendCustomerOrderStatusUpdateEmail(order, req.body.status).catch(err => {
-        console.warn("Failed to send status update email from store:", err?.message || err);
-      });
-    }
+    // Send customer order status update email for all status transitions
+    sendCustomerOrderStatusUpdateEmail(order, req.body.status).catch(err => {
+      console.warn("Failed to send status update email from store:", err?.message || err);
+    });
 
     res.json(order);
   } catch (err) {
@@ -664,6 +663,10 @@ router.patch("/orders/:id/pack", protect, async (req, res) => {
       entityType: "ORDER",
       entityId: order._id.toString(),
       note: "Order marked Packed by store"
+    });
+
+    sendCustomerOrderStatusUpdateEmail(order, "PACKED").catch(err => {
+      console.warn("Failed to send pack email from store:", err?.message || err);
     });
 
     res.json(order);
