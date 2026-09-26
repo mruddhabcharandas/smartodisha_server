@@ -58,4 +58,70 @@ router.post("/cashfree", express.raw({ type: "application/json" }), async (req, 
   }
 });
 
+// Delhivery Webhook Receiver
+router.post("/delhivery", async (req, res) => {
+  try {
+    const payload = req.body;
+    console.log("[Delhivery Webhook] Received update at /api/webhooks/delhivery:", JSON.stringify(payload, null, 2));
+
+    const { updateOrderWithDelhiveryStatus } = await import("../services/delhiveryTrackingSync.js");
+
+    let items = [];
+    if (Array.isArray(payload)) {
+      items = payload;
+    } else if (Array.isArray(payload?.ShipmentData)) {
+      items = payload.ShipmentData.map(s => s.Shipment || s);
+    } else if (Array.isArray(payload?.shipments)) {
+      items = payload.shipments;
+    } else if (payload) {
+      items = [payload];
+    }
+
+    let updatedCount = 0;
+
+    for (const item of items) {
+      const waybill = item.waybill || item.Waybill || item.awb || item.AWB || item.wbn;
+      const orderRef = item.order || item.Order || item.order_id || item.orderId;
+
+      let rawStatus = "";
+      if (typeof item.status === "string") rawStatus = item.status;
+      else if (typeof item.Status === "string") rawStatus = item.Status;
+      else if (item.Status?.Status) rawStatus = item.Status.Status;
+      else if (item.Status?.Instructions) rawStatus = item.Status.Instructions;
+      else if (item.CurrentStatus) rawStatus = item.CurrentStatus;
+      else if (item.status?.status) rawStatus = item.status.status;
+
+      if (!waybill && !orderRef) continue;
+
+      const filter = [];
+      if (waybill) {
+        filter.push({ "shipping.waybill": waybill });
+        filter.push({ delhiveryWaybill: waybill });
+      }
+      if (orderRef) {
+        const mongoose = (await import("mongoose")).default;
+        if (mongoose.isValidObjectId(orderRef)) {
+          filter.push({ _id: orderRef });
+        }
+        filter.push({ orderNumber: orderRef });
+      }
+
+      const order = await Order.findOne({ $or: filter });
+      if (order && rawStatus) {
+        const syncRes = await updateOrderWithDelhiveryStatus(order, rawStatus, {
+          waybill: waybill || order.shipping?.waybill,
+          location: item.location || item.StatusLocation,
+          timestamp: item.timestamp || item.StatusDateTime
+        });
+        if (syncRes.hasChanged) updatedCount++;
+      }
+    }
+
+    res.status(200).json({ success: true, processed: items.length, updated: updatedCount });
+  } catch (err) {
+    console.error("[Delhivery Webhook] Error:", err);
+    res.status(400).json({ error: "webhook_processing_failed", message: err.message });
+  }
+});
+
 export default router;

@@ -240,11 +240,33 @@ const tryCreateDelhiveryShipment = async (order) => {
     const result = await createShipment(shipmentData);
 
     if (result.waybill) {
-      const trackingUrl = `https://www.delhivery.com/track/packages/${result.waybill}`;
-      order.shipping = { provider: "DELHIVERY", waybill: result.waybill, status: "CREATED", trackingUrl };
+      const trackingUrl = `https://www.delhivery.com/track/package/${result.waybill}`;
+      order.shipping = { provider: "DELHIVERY", waybill: result.waybill, status: "Manifested", trackingUrl };
+      order.delhiveryWaybill = result.waybill;
+      order.shipment_status = "Manifested";
       order.shippingAddress = addr;
-      // Do not auto-set order status to SHIPPED. Keep it as CONFIRMED so seller can manually manage the fulfillment lifecycle.
+      order.status = "SHIPPED";
       await order.save();
+
+      try {
+        await AuditLog.create({
+          actorId: null,
+          actorRole: "delhivery",
+          type: "ORDER_STATUS",
+          entityType: "ORDER",
+          entityId: order._id.toString(),
+          note: `Delhivery shipment created. Waybill: ${result.waybill}. Order marked as SHIPPED.`
+        });
+      } catch {}
+
+      notifyAdmin("order_status_updated", {
+        orderId: order._id,
+        orderNumber: order.orderNumber,
+        status: "SHIPPED",
+        delhiveryStatus: "Manifested",
+        waybill: result.waybill
+      });
+
       return order;
     }
 

@@ -923,7 +923,9 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
     
     if (waybill) {
       const trackingUrl = `https://www.delhivery.com/track/package/${waybill}`;
-      order.shipping = { provider: "DELHIVERY", waybill, status: "CREATED", trackingUrl };
+      order.shipping = { provider: "DELHIVERY", waybill, status: "Manifested", trackingUrl };
+      order.delhiveryWaybill = waybill;
+      order.shipment_status = "Manifested";
       order.shippingAddress = addr;
       order.status = "SHIPPED";
       await order.save();
@@ -934,8 +936,19 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
         type: "ORDER_STATUS",
         entityType: "ORDER",
         entityId: order._id.toString(),
-        note: `Delhivery shipment created. Waybill: ${waybill}`
+        note: `Delhivery shipment created. Waybill: ${waybill}. Order marked as SHIPPED.`
       });
+
+      try {
+        const { notifyAdmin } = await import("../lib/socket.js");
+        notifyAdmin("order_status_updated", {
+          orderId: order._id,
+          orderNumber: order.orderNumber,
+          status: "SHIPPED",
+          delhiveryStatus: "Manifested",
+          waybill
+        });
+      } catch {}
 
       return res.json({ success: true, waybill, trackingUrl, status: order.status });
     }
@@ -944,6 +957,22 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
   } catch (err) {
     console.error("Seller Delhivery create failed:", err.message || err);
     res.status(502).json({ error: "shipment_creation_failed", message: err.message });
+  }
+});
+
+// Sync live Delhivery status for order (seller)
+router.post("/orders/:id/delhivery/sync", protect, async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  try {
+    const order = await Order.findOne({ _id: req.params.id, store: req.store._id });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const { syncOrderDelhiveryStatus } = await import("../services/delhiveryTrackingSync.js");
+    const syncRes = await syncOrderDelhiveryStatus(order);
+    res.json(syncRes);
+  } catch (err) {
+    console.error("Seller Delhivery sync failed:", err);
+    res.status(500).json({ error: "sync_failed", message: err.message });
   }
 });
 

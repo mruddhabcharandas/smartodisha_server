@@ -434,27 +434,67 @@ export const trackShipment = async (waybill) => {
  * Format tracking response
  */
 const formatTrackingResponse = (data, waybill) => {
-  if (data?.ShipmentData?.Shipment?.[0]) {
-    const shipment = data.ShipmentData.Shipment[0];
-    const status = shipment.Status?.Status?.[0] || {};
-    
+  let shipmentObj = null;
+
+  if (Array.isArray(data?.ShipmentData) && data.ShipmentData.length > 0) {
+    shipmentObj = data.ShipmentData[0]?.Shipment || data.ShipmentData[0];
+  } else if (data?.ShipmentData?.Shipment) {
+    shipmentObj = Array.isArray(data.ShipmentData.Shipment) ? data.ShipmentData.Shipment[0] : data.ShipmentData.Shipment;
+  } else if (Array.isArray(data?.packages) && data.packages.length > 0) {
+    shipmentObj = data.packages[0];
+  } else if (data?.shipment) {
+    shipmentObj = data.shipment;
+  }
+
+  if (shipmentObj) {
+    let rawStatus = "";
+    let statusCode = null;
+    let timestamp = null;
+    let location = null;
+
+    const statusField = shipmentObj.Status || shipmentObj.status;
+
+    if (typeof statusField === "string") {
+      rawStatus = statusField;
+    } else if (statusField && typeof statusField === "object") {
+      rawStatus = typeof statusField.Status === "string"
+        ? statusField.Status
+        : (typeof statusField.status === "string" ? statusField.status : (statusField.Instructions || statusField.StatusType || ""));
+      statusCode = statusField.StatusCode || statusField.status_code || statusField.StatusType || null;
+      timestamp = statusField.StatusDateTime || statusField.status_date_time || statusField.timestamp || null;
+      location = statusField.StatusLocation || statusField.location || null;
+    }
+
+    if (!rawStatus && shipmentObj.CurrentStatus) {
+      rawStatus = String(shipmentObj.CurrentStatus);
+    }
+
+    // Check latest scan if status is still empty
+    if (!rawStatus && Array.isArray(shipmentObj.Scans) && shipmentObj.Scans.length > 0) {
+      const latestScan = shipmentObj.Scans[shipmentObj.Scans.length - 1]?.ScanDetail || shipmentObj.Scans[shipmentObj.Scans.length - 1];
+      rawStatus = latestScan?.Scan || latestScan?.Instructions || latestScan?.Status || "";
+      timestamp = timestamp || latestScan?.ScanDateTime;
+      location = location || latestScan?.ScannedLocation;
+    }
+
     return {
-      waybill: waybill,
-      status: status.Status || 'Unknown',
-      statusCode: status.StatusCode || null,
-      timestamp: status.StatusDateTime || null,
-      location: status.StatusLocation || null,
-      shipments: data.ShipmentData.Shipment,
+      waybill,
+      status: rawStatus || 'Unknown',
+      statusCode,
+      timestamp,
+      location,
+      shipment: shipmentObj,
       raw: data
     };
   }
-  
+
   return {
     waybill: waybill,
-    status: 'Not Found',
+    status: typeof data?.status === 'string' ? data.status : 'Not Found',
     raw: data
   };
 };
+
 
 /**
  * Generate shipping label

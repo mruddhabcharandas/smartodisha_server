@@ -129,6 +129,18 @@ const start = async () => {
     warmCache().catch(err => console.error("Warming Error:", err));
 
     await ensureDefaultAdmin();
+
+    // Start background Delhivery shipment status auto-sync (runs every 15 minutes)
+    setTimeout(() => {
+      import("./services/delhiveryTrackingSync.js")
+        .then(({ syncAllActiveDelhiveryOrders }) => {
+          syncAllActiveDelhiveryOrders().catch(e => console.error("Initial Delhivery sync warning:", e.message));
+          setInterval(() => {
+            syncAllActiveDelhiveryOrders().catch(e => console.error("Periodic Delhivery sync warning:", e.message));
+          }, 15 * 60 * 1000);
+        })
+        .catch(err => console.error("Failed to initialize Delhivery sync worker:", err.message));
+    }, 60 * 1000);
   } catch (err) {
     console.error("Error during server setup:", err);
   }

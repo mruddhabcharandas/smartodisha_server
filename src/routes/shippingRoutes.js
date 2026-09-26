@@ -343,16 +343,27 @@ router.post("/delhivery/create", auth, requirePermission("orders"), async (req, 
     
     const waybill = result?.packages?.[0]?.waybill || '';
     const trackingUrl = `https://www.delhivery.com/track/package/${waybill}`;
-    const status = 'Created';
+    const status = 'Manifested';
 
-    order.shipping = { provider: 'Delhivery', waybill, status, trackingUrl };
+    order.shipping = { provider: 'DELHIVERY', waybill, status, trackingUrl };
     order.delhiveryWaybill = waybill;
     order.shipment_status = status;
     order.shippingAddress = addr;
-    order.status = 'PACKED';
+    order.status = 'SHIPPED';
     await order.save();
 
-    res.json({ waybill, trackingUrl, status });
+    try {
+      const { notifyAdmin } = await import("../lib/socket.js");
+      notifyAdmin("order_status_updated", {
+        orderId: order._id,
+        orderNumber: order.orderNumber,
+        status: "SHIPPED",
+        delhiveryStatus: status,
+        waybill
+      });
+    } catch {}
+
+    res.json({ waybill, trackingUrl, status, orderStatus: order.status });
   } catch (error) {
     console.error("Delhivery shipment creation failed:", error);
     res.status(502).json({ error: "shipment_creation_failed" });
@@ -363,11 +374,122 @@ router.get("/delhivery/track/:waybill", async (req, res) => {
   const waybill = req.params.waybill;
   try {
     const result = await delhivery.trackShipment(waybill);
+    
+    // Auto-update order status in database directly from Delhivery
+    if (result && result.status && result.status !== "Not Found" && result.status !== "Unknown") {
+      const order = await Order.findOne({
+        $or: [{ "shipping.waybill": waybill }, { delhiveryWaybill: waybill }]
+      });
+      if (order) {
+        const { updateOrderWithDelhiveryStatus } = await import("../services/delhiveryTrackingSync.js");
+        await updateOrderWithDelhiveryStatus(order, result.status, {
+          waybill,
+          location: result.location,
+          timestamp: result.timestamp,
+          statusCode: result.statusCode
+        });
+      }
+    }
+
     res.json(result);
-  } catch {
+  } catch (err) {
     res.json({ waybill, status: "In Transit", last_update: new Date().toISOString() });
   }
 });
+
+// Admin/Seller: Sync single order directly from Delhivery
+router.post("/delhivery/sync/:id", auth, requireRole(["admin", "seller"]), async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const { syncOrderDelhiveryStatus } = await import("../services/delhiveryTrackingSync.js");
+    const syncRes = await syncOrderDelhiveryStatus(order);
+    res.json(syncRes);
+  } catch (err) {
+    console.error("Delhivery sync order failed:", err);
+    res.status(500).json({ error: "sync_failed", message: err.message });
+  }
+});
+
+// Admin/Seller: Sync all active shipments from Delhivery
+router.post("/delhivery/sync-all", auth, requireRole(["admin", "seller"]), async (req, res) => {
+  try {
+    const { syncAllActiveDelhiveryOrders } = await import("../services/delhiveryTrackingSync.js");
+    const result = await syncAllActiveDelhiveryOrders();
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("Delhivery sync all failed:", err);
+    res.status(500).json({ error: "sync_all_failed", message: err.message });
+  }
+});
+
+// Webhook endpoint for Delhivery push notifications
+router.post("/delhivery/webhook", async (req, res) => {
+  try {
+    const payload = req.body;
+    console.log("[Delhivery Webhook] Received update:", JSON.stringify(payload, null, 2));
+
+    const { updateOrderWithDelhiveryStatus } = await import("../services/delhiveryTrackingSync.js");
+
+    let items = [];
+    if (Array.isArray(payload)) {
+      items = payload;
+    } else if (Array.isArray(payload?.ShipmentData)) {
+      items = payload.ShipmentData.map(s => s.Shipment || s);
+    } else if (Array.isArray(payload?.shipments)) {
+      items = payload.shipments;
+    } else if (payload) {
+      items = [payload];
+    }
+
+    let updatedCount = 0;
+
+    for (const item of items) {
+      const waybill = item.waybill || item.Waybill || item.awb || item.AWB || item.wbn;
+      const orderRef = item.order || item.Order || item.order_id || item.orderId;
+      
+      let rawStatus = "";
+      if (typeof item.status === "string") rawStatus = item.status;
+      else if (typeof item.Status === "string") rawStatus = item.Status;
+      else if (item.Status?.Status) rawStatus = item.Status.Status;
+      else if (item.Status?.Instructions) rawStatus = item.Status.Instructions;
+      else if (item.CurrentStatus) rawStatus = item.CurrentStatus;
+      else if (item.status?.status) rawStatus = item.status.status;
+
+      if (!waybill && !orderRef) continue;
+
+      const filter = [];
+      if (waybill) {
+        filter.push({ "shipping.waybill": waybill });
+        filter.push({ delhiveryWaybill: waybill });
+      }
+      if (orderRef && mongoose.isValidObjectId(orderRef)) {
+        filter.push({ _id: orderRef });
+      }
+      if (orderRef) {
+        filter.push({ orderNumber: orderRef });
+      }
+
+      const order = await Order.findOne({ $or: filter });
+      if (order && rawStatus) {
+        const syncRes = await updateOrderWithDelhiveryStatus(order, rawStatus, {
+          waybill: waybill || order.shipping?.waybill,
+          location: item.location || item.StatusLocation,
+          timestamp: item.timestamp || item.StatusDateTime
+        });
+        if (syncRes.hasChanged) updatedCount++;
+      }
+    }
+
+    res.status(200).json({ success: true, processed: items.length, updated: updatedCount });
+  } catch (err) {
+    console.error("[Delhivery Webhook] Error:", err);
+    res.status(400).json({ error: "webhook_processing_failed", message: err.message });
+  }
+});
+
 
 router.get("/delhivery/label/:waybill", auth, requireRole(["admin", "seller"]), async (req, res) => {
   const waybill = req.params.waybill;
