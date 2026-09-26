@@ -91,6 +91,22 @@ export async function getZohoAccountInfo() {
   return { accountId, primaryAddress, domain, accessToken };
 }
 
+const COMPANY_NAME = process.env.COMPANY_NAME || "SmartOdisha";
+const LOGO_URL = process.env.LOGO_URL || "https://smartodisha.in/logo.png";
+const FRONTEND_URL = process.env.FRONTEND_URL || "https://smartodisha.in";
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "support@smartodisha.in";
+const NOREPLY_EMAIL = process.env.NOREPLY_EMAIL || process.env.ZOHO_NOREPLY_EMAIL || "noreply@smartodisha.in";
+
+/**
+ * Centralized sender configuration across all transactional emails
+ * SmartOdisha noreply@smartodisha.in
+ */
+export const CENTRALIZED_SENDER = Object.freeze({
+  name: COMPANY_NAME,
+  email: extractCleanEmail(NOREPLY_EMAIL) || "noreply@smartodisha.in",
+  formatted: `${COMPANY_NAME} <${extractCleanEmail(NOREPLY_EMAIL) || "noreply@smartodisha.in"}>`
+});
+
 export const sendEmail = async ({ to, subject, text, html, from }) => {
   const content = html || (text ? `<pre>${text}</pre>` : "");
   try {
@@ -100,16 +116,19 @@ export const sendEmail = async ({ to, subject, text, html, from }) => {
       throw new Error("Zoho Account ID is missing. Please set ZOHO_ACCOUNT_ID in environment or verify Zoho credentials.");
     }
 
-    // Default sender is ALWAYS noreply as required
-    const targetNoreply = extractCleanEmail(
-      from ||
-      process.env.NOREPLY_EMAIL ||
-      process.env.ZOHO_NOREPLY_EMAIL ||
-      "noreply@smartodisha.in"
-    );
+    // Default sender is ALWAYS SmartOdisha <noreply@smartodisha.in>
+    const cleanSenderEmail = extractCleanEmail(from) || CENTRALIZED_SENDER.email;
+    const formattedSender = from && from.includes("<") ? from : `${CENTRALIZED_SENDER.name} <${cleanSenderEmail}>`;
 
+    const headers = {
+      Authorization: `Zoho-oauthtoken ${accessToken}`,
+      "Content-Type": "application/json"
+    };
+    const url = `https://mail.zoho.${domain}/api/accounts/${accountId}/messages`;
+
+    // Attempt 1: Full RFC formatted sender with display name "SmartOdisha <noreply@smartodisha.in>"
     const payload = {
-      fromAddress: targetNoreply,
+      fromAddress: formattedSender,
       toAddress: to,
       subject,
       content,
@@ -117,42 +136,54 @@ export const sendEmail = async ({ to, subject, text, html, from }) => {
     };
 
     try {
-      const res = await axios.post(
-        `https://mail.zoho.${domain}/api/accounts/${accountId}/messages`,
-        payload,
-        {
-          headers: {
-            Authorization: `Zoho-oauthtoken ${accessToken}`,
-            "Content-Type": "application/json"
-          }
-        }
-      );
+      const res = await axios.post(url, payload, { headers });
       return { sent: true, data: res.data };
     } catch (sendErr) {
-      // If Zoho returns INVALID_FROM_ADDRESS because "noreply@" hasn't been added as an alias in Zoho Mail admin panel yet,
-      // fallback to the verified primaryAddress so the email never fails!
       const errData = sendErr?.response?.data;
+      const errMsg = JSON.stringify(errData || sendErr.message || "").toLowerCase();
+
+      // Attempt 2: If Zoho rejects angle brackets/display name in fromAddress, retry with pure clean email
+      if (payload.fromAddress !== cleanSenderEmail) {
+        console.warn(`[Zoho Mailer] Formatted sender '${formattedSender}' not accepted by Zoho endpoint. Retrying with '${cleanSenderEmail}'...`);
+        payload.fromAddress = cleanSenderEmail;
+        try {
+          const retryRes = await axios.post(url, payload, { headers });
+          return { sent: true, data: retryRes.data };
+        } catch (cleanErr) {
+          const cleanErrData = cleanErr?.response?.data;
+          const cleanErrMsg = JSON.stringify(cleanErrData || cleanErr.message || "").toLowerCase();
+          const isInvalidFrom = cleanErrData && (
+            cleanErrData.code === "INVALID_FROM_ADDRESS" ||
+            cleanErrData.status?.code === 400 ||
+            cleanErrMsg.includes("from address") ||
+            cleanErrMsg.includes("invalid_from")
+          );
+
+          if (isInvalidFrom && primaryAddress && cleanSenderEmail !== primaryAddress) {
+            console.warn(`[Zoho Mailer] '${cleanSenderEmail}' is not an authorized alias in Zoho. Retrying with primary address: '${primaryAddress}'`);
+            payload.fromAddress = primaryAddress;
+            const fallbackRes = await axios.post(url, payload, { headers });
+            return { sent: true, data: fallbackRes.data, fallbackUsed: true };
+          }
+          throw cleanErr;
+        }
+      }
+
+      // If initial attempt was already clean address and failed due to unverified alias in Zoho
       const isInvalidFrom = errData && (
-        errData.code === "INVALID_FROM_ADDRESS" || 
-        errData.status?.code === 400 || 
-        JSON.stringify(errData).toLowerCase().includes("from address")
+        errData.code === "INVALID_FROM_ADDRESS" ||
+        errData.status?.code === 400 ||
+        errMsg.includes("from address") ||
+        errMsg.includes("invalid_from")
       );
 
-      if (isInvalidFrom && primaryAddress && targetNoreply !== primaryAddress) {
-        console.warn(`[Zoho Mailer] '${targetNoreply}' is not an authorized alias in Zoho. Retrying with primary address: '${primaryAddress}'`);
+      if (isInvalidFrom && primaryAddress && cleanSenderEmail !== primaryAddress) {
+        console.warn(`[Zoho Mailer] '${cleanSenderEmail}' is not an authorized alias in Zoho. Retrying with primary address: '${primaryAddress}'`);
         payload.fromAddress = primaryAddress;
-        const retryRes = await axios.post(
-          `https://mail.zoho.${domain}/api/accounts/${accountId}/messages`,
-          payload,
-          {
-            headers: {
-              Authorization: `Zoho-oauthtoken ${accessToken}`,
-              "Content-Type": "application/json"
-            }
-          }
-        );
+        const retryRes = await axios.post(url, payload, { headers });
         return { sent: true, data: retryRes.data, fallbackUsed: true };
       }
+
       throw sendErr;
     }
   } catch (err) {
@@ -161,12 +192,6 @@ export const sendEmail = async ({ to, subject, text, html, from }) => {
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
 };
-
-const COMPANY_NAME = process.env.COMPANY_NAME || "SmartOdisha";
-const LOGO_URL = process.env.LOGO_URL || "https://smartodisha.in/logo.png";
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://smartodisha.in";
-const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || process.env.ZOHO_MAIL_FROM || "support@smartodisha.in";
-const NOREPLY_EMAIL = process.env.NOREPLY_EMAIL || process.env.ZOHO_NOREPLY_EMAIL || "noreply@smartodisha.in";
 
 /**
  * Helper to build the Master Luxury Email Wrapper
@@ -256,11 +281,14 @@ const buildEmailWrapper = ({ previewText = "", badgeText = "", badgeColor = "#4f
           <!-- Footer Area -->
           <tr>
             <td class="footer-area">
+              <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:14px; padding:16px 20px; margin-bottom:18px; text-align:center;">
+                <div style="color:#0f172a; font-size:13px; font-weight:700; margin-bottom:4px;">Need Assistance?</div>
+                <div style="color:#475569; font-size:12px; line-height:1.5;">
+                  For any reply, support, or issue, please contact <a href="mailto:support@smartodisha.in" style="color:#4f46e5; text-decoration:underline; font-weight:700;">support@smartodisha.in</a>.
+                </div>
+              </div>
               <p style="margin:0 0 6px; color:#94a3b8; font-size:11px; font-weight:600;">
                 Please do not reply directly to this email. This is an automated notification from a no-reply address.
-              </p>
-              <p style="margin:0 0 8px; color:#64748b; font-weight:600;">
-                For inquiries or assistance, write to <a href="mailto:${SUPPORT_EMAIL}" style="color:#4f46e5; text-decoration:none; font-weight:700;">${SUPPORT_EMAIL}</a>
               </p>
               <p style="margin:0 0 12px; color:#94a3b8; font-size:11px;">
                 You received this transactional message because you are a registered user/merchant of ${COMPANY_NAME}.
@@ -431,6 +459,8 @@ export const sendCustomerOrderConfirmationEmail = async (order) => {
       ? Object.entries(it.attributes).map(([k, v]) => `${k}: ${v}`).join(" • ")
       : (it.variantSku ? `SKU: ${it.variantSku}` : "");
 
+    const productUrl = it.product ? `${FRONTEND_URL}/products/${it.product}` : `${FRONTEND_URL}/products`;
+
     return `
       <tr>
         <td style="padding:14px 0; border-bottom:1px solid #f1f5f9;">
@@ -438,11 +468,15 @@ export const sendCustomerOrderConfirmationEmail = async (order) => {
             <tr>
               ${it.image ? `
                 <td width="56" valign="top" style="padding-right:14px;">
-                  <img src="${it.image}" alt="${it.name}" width="56" height="56" style="width:56px; height:56px; object-fit:cover; border-radius:12px; border:1px solid #e2e8f0;" />
+                  <a href="${productUrl}" target="_blank" style="text-decoration:none; display:block;">
+                    <img src="${it.image}" alt="${it.name}" width="56" height="56" style="width:56px; height:56px; object-fit:cover; border-radius:12px; border:1px solid #e2e8f0;" />
+                  </a>
                 </td>
               ` : ""}
               <td valign="top">
-                <div style="font-size:13px; font-weight:800; color:#0f172a; line-height:1.4;">${it.name}</div>
+                <div style="font-size:13px; font-weight:800; color:#0f172a; line-height:1.4;">
+                  <a href="${productUrl}" target="_blank" style="color:#0f172a; text-decoration:none; font-weight:800;">${it.name}</a>
+                </div>
                 ${attrText ? `<div style="font-size:11px; color:#64748b; font-weight:600; margin-top:2px;">${attrText}</div>` : ""}
                 <div style="font-size:12px; color:#94a3b8; font-weight:700; margin-top:4px;">Qty: ${it.quantity}</div>
               </td>
@@ -554,7 +588,7 @@ export const sendCustomerOrderConfirmationEmail = async (order) => {
     subheading: `Your order #${orderNum} has been received and our verified seller is preparing it for shipment.`,
     bodyHtml,
     ctaText: "Track Your Order 🚚",
-    ctaUrl: `${FRONTEND_URL}/order-history`
+    ctaUrl: `${FRONTEND_URL}/orders`
   });
 
   return sendEmail({ to: order.customer.email, subject, html });
@@ -577,11 +611,13 @@ export const sendSellerNewOrderAlertEmail = async (sellerEmail, sellerName = "Se
       ? Object.entries(it.attributes).map(([k, v]) => `${k}: ${v}`).join(" • ")
       : (it.variantSku ? `SKU: ${it.variantSku}` : "");
 
+    const productUrl = it.product ? `${FRONTEND_URL}/products/${it.product}` : `${FRONTEND_URL}/business/products`;
+
     return `
       <tr>
         <td style="padding:10px 0; border-bottom:1px solid #f1f5f9; font-size:13px; font-weight:700; color:#0f172a;">
-          ${it.name}
-          ${attrText ? `<div style="font-size:11px; font-weight:600; color:#64748b;">${attrText}</div>` : ""}
+          <a href="${productUrl}" target="_blank" style="color:#0f172a; text-decoration:none; font-weight:700;">${it.name}</a>
+          ${attrText ? `<div style="font-size:11px; font-weight:600; color:#64748b; margin-top:2px;">${attrText}</div>` : ""}
         </td>
         <td align="center" style="padding:10px 0; border-bottom:1px solid #f1f5f9; font-size:13px; font-weight:800; color:#0f172a;">
           <span style="background:#eef2ff; color:#4f46e5; padding:3px 10px; border-radius:999px;">${it.quantity}</span>
@@ -689,7 +725,7 @@ export const sendCustomerOrderStatusUpdateEmail = async (order, targetStatus, cu
   let subheading = `Your order status has been updated.`;
   let subject = `Update on your SmartOdisha Order #${orderNum}`;
   let ctaText = "View Order Details";
-  let ctaUrl = `${FRONTEND_URL}/order-history`;
+  let ctaUrl = `${FRONTEND_URL}/orders`;
 
   let statusCardContent = "";
 
@@ -702,7 +738,7 @@ export const sendCustomerOrderStatusUpdateEmail = async (order, targetStatus, cu
       heading = "Your Order is Confirmed!";
       subheading = `Thank you, ${customerName}! Your order #${orderNum} has been confirmed and the seller is preparing your package.`;
       ctaText = "View Order Details 📄";
-      ctaUrl = `${FRONTEND_URL}/order-history`;
+      ctaUrl = `${FRONTEND_URL}/orders`;
 
       statusCardContent = `
         <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:18px; padding:20px; margin-bottom:24px;">
@@ -722,7 +758,7 @@ export const sendCustomerOrderStatusUpdateEmail = async (order, targetStatus, cu
       heading = "Your Items are Being Prepared";
       subheading = `Hi ${customerName}, the seller has started picking and quality-checking your items for order #${orderNum}.`;
       ctaText = "View Order Status 🔍";
-      ctaUrl = `${FRONTEND_URL}/order-history`;
+      ctaUrl = `${FRONTEND_URL}/orders`;
 
       statusCardContent = `
         <div style="background:#eef2ff; border:1px solid #c7d2fe; border-radius:18px; padding:20px; margin-bottom:24px;">
@@ -742,7 +778,7 @@ export const sendCustomerOrderStatusUpdateEmail = async (order, targetStatus, cu
       heading = "Your Package is Packed!";
       subheading = `Great news, ${customerName}! Your order #${orderNum} is safely packed and waiting for Delhivery courier pickup.`;
       ctaText = "Track Order 🚚";
-      ctaUrl = `${FRONTEND_URL}/order-history`;
+      ctaUrl = `${FRONTEND_URL}/orders`;
 
       statusCardContent = `
         <div style="background:#ecfeff; border:1px solid #a5f3fc; border-radius:18px; padding:20px; margin-bottom:24px;">
@@ -762,7 +798,7 @@ export const sendCustomerOrderStatusUpdateEmail = async (order, targetStatus, cu
       heading = "Your Order is on the Way!";
       subheading = `Great news, ${customerName}! Your package has been handed over to Delhivery Express for fast delivery.`;
       ctaText = "Track Package Live 📍";
-      ctaUrl = trackingUrl || `${FRONTEND_URL}/order-history`;
+      ctaUrl = trackingUrl || `${FRONTEND_URL}/orders`;
 
       statusCardContent = `
         <div style="background:#090d16; border-radius:18px; padding:22px; margin-bottom:24px; color:#ffffff; border:1px solid #1e293b;">
@@ -775,7 +811,9 @@ export const sendCustomerOrderStatusUpdateEmail = async (order, targetStatus, cu
               ${waybill ? `
                 <td align="right">
                   <div style="font-size:10px; font-weight:800; letter-spacing:0.15em; text-transform:uppercase; color:#94a3b8;">Waybill / AWB No.</div>
-                  <div style="font-size:16px; font-weight:900; color:#4ade80; font-family:monospace; margin-top:2px;">${waybill}</div>
+                  <div style="font-size:16px; font-weight:900; color:#4ade80; font-family:monospace; margin-top:2px;">
+                    ${trackingUrl ? `<a href="${trackingUrl}" target="_blank" style="color:#4ade80; text-decoration:underline;">${waybill}</a>` : waybill}
+                  </div>
                 </td>
               ` : ""}
             </tr>
@@ -792,7 +830,7 @@ export const sendCustomerOrderStatusUpdateEmail = async (order, targetStatus, cu
       heading = "Your Package Arrives Today!";
       subheading = `The Delhivery delivery executive is out with your package and will deliver it today.`;
       ctaText = "Track Delivery Executive 📍";
-      ctaUrl = trackingUrl || `${FRONTEND_URL}/order-history`;
+      ctaUrl = trackingUrl || `${FRONTEND_URL}/orders`;
 
       statusCardContent = `
         <div style="background:#fef3c7; border:1px solid #fde68a; border-radius:18px; padding:20px; margin-bottom:24px;">
@@ -813,7 +851,7 @@ export const sendCustomerOrderStatusUpdateEmail = async (order, targetStatus, cu
       heading = "Your Package has been Delivered!";
       subheading = `We hope you love your purchase from SmartOdisha. Thank you for shopping with us!`;
       ctaText = "Rate Your Purchase ⭐";
-      ctaUrl = `${FRONTEND_URL}/order-history`;
+      ctaUrl = `${FRONTEND_URL}/orders`;
 
       statusCardContent = `
         <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:18px; padding:20px; margin-bottom:24px; text-align:center;">
@@ -831,8 +869,8 @@ export const sendCustomerOrderStatusUpdateEmail = async (order, targetStatus, cu
       badgeBg = "#f1f5f9";
       heading = "Return Package Received";
       subheading = `Your returned parcel for order #${orderNum} has been received back at the facility.`;
-      ctaText = "Contact Support 💬";
-      ctaUrl = `${FRONTEND_URL}/order-history`;
+      ctaText = "View Orders 📦";
+      ctaUrl = `${FRONTEND_URL}/orders`;
 
       statusCardContent = `
         <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:18px; padding:20px; margin-bottom:24px;">
@@ -880,7 +918,9 @@ export const sendCustomerOrderStatusUpdateEmail = async (order, targetStatus, cu
         <tr>
           <td>
             <div style="font-size:11px; font-weight:800; text-transform:uppercase; color:#94a3b8;">Order ID</div>
-            <div style="font-size:14px; font-weight:800; color:#0f172a; margin-top:2px;">#${orderNum}</div>
+            <div style="font-size:14px; font-weight:800; color:#0f172a; margin-top:2px;">
+              <a href="${FRONTEND_URL}/orders" target="_blank" style="color:#4f46e5; text-decoration:none; font-family:monospace; font-weight:900;">#${orderNum}</a>
+            </div>
           </td>
           <td align="right">
             <div style="font-size:11px; font-weight:800; text-transform:uppercase; color:#94a3b8;">Total Items</div>
@@ -1178,7 +1218,7 @@ export const sendSellerPayoutProcessedEmail = async ({
     subheading: `Hi ${sellerName}, your vendor payout has been released. Full breakdown below.`,
     bodyHtml,
     ctaText: "View Earnings & Statements 📊",
-    ctaUrl: `${FRONTEND_URL}/business/earnings`
+    ctaUrl: `${FRONTEND_URL}/business/wallet`
   });
 
   return sendEmail({ to: sellerEmail, subject, html });
@@ -1277,7 +1317,7 @@ export const sendSellerWalletDeductionEmail = async ({
     subheading: `Hi ${sellerName}, an adjustment has been made to your pending balance. Details are provided below.`,
     bodyHtml,
     ctaText: "Check Wallet Balance 💼",
-    ctaUrl: `${FRONTEND_URL}/business/earnings`
+    ctaUrl: `${FRONTEND_URL}/business/wallet`
   });
 
   return sendEmail({ to: sellerEmail, subject, html });
@@ -1292,16 +1332,19 @@ export const sendSellerOrderCancelledAlertEmail = async (sellerEmail, sellerName
   const orderNum = order.orderNumber || String(order._id).slice(-8).toUpperCase();
   const subject = `🚫 Cancelled: Order #${orderNum} Has Been Cancelled - Do Not Dispatch`;
 
-  const itemsRows = (order.items || []).map(it => `
-    <tr>
-      <td style="padding:8px 0; border-bottom:1px solid #f1f5f9; font-size:13px; font-weight:700; color:#0f172a;">
-        ${it.name}
-      </td>
-      <td align="center" style="padding:8px 0; border-bottom:1px solid #f1f5f9; font-size:13px; font-weight:800; color:#991b1b;">
-        ${it.quantity}
-      </td>
-    </tr>
-  `).join("");
+  const itemsRows = (order.items || []).map(it => {
+    const productUrl = it.product ? `${FRONTEND_URL}/products/${it.product}` : `${FRONTEND_URL}/business/products`;
+    return `
+      <tr>
+        <td style="padding:8px 0; border-bottom:1px solid #f1f5f9; font-size:13px; font-weight:700; color:#0f172a;">
+          <a href="${productUrl}" target="_blank" style="color:#0f172a; text-decoration:none; font-weight:700;">${it.name}</a>
+        </td>
+        <td align="center" style="padding:8px 0; border-bottom:1px solid #f1f5f9; font-size:13px; font-weight:800; color:#991b1b;">
+          ${it.quantity}
+        </td>
+      </tr>
+    `;
+  }).join("");
 
   const bodyHtml = `
     <div style="background:#fef2f2; border:1px solid #fecaca; border-radius:18px; padding:20px; margin-bottom:24px;">

@@ -423,7 +423,9 @@ export const confirmAndFinalizeOrder = async (order, cashfreePaymentId, cashfree
           { label: "Total Sale", value: `₹${Number(order.totalEstimate || 0).toLocaleString("en-IN")}` },
           { label: "Admin Cut", value: `₹${Number(order.adminRevenue || 0).toLocaleString("en-IN")}` },
           { label: "Customer", value: `${order.customer?.name} (${order.customer?.phone})` }
-        ]
+        ],
+        ctaText: "Open Admin Orders 📦",
+        ctaUrl: `${process.env.FRONTEND_URL || "https://smartodisha.in"}/admin/orders`
       });
       sendEmail({ to: adminEmail, subject: `System Order Alert - #${order.orderNumber}`, html: adminHtml }).catch(() => {});
     }

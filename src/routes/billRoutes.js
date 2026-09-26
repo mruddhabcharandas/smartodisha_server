@@ -89,7 +89,7 @@ router.post("/:id/send-email", auth, requireRole("admin"), async (req, res) => {
   try {
     await sendEmail({
       to: bill.customer.email,
-      subject: `Invoice ${bill.invoiceNumber || bill._id} - ${process.env.COMPANY_NAME || "Click2Kart"}`,
+      subject: `Invoice ${bill.invoiceNumber || bill._id} - ${process.env.COMPANY_NAME || "SmartOdisha"}`,
       html: `
         <div style="font-family: ui-sans-serif, system-ui; max-width: 680px; margin: auto; padding: 24px; border: 1px solid #eee; border-radius: 12px;">
           <h2 style="color:#111827;margin:0 0 12px;font-weight:800">Your Invoice ${bill.invoiceNumber || bill._id}</h2>
@@ -98,9 +98,14 @@ router.post("/:id/send-email", auth, requireRole("admin"), async (req, res) => {
             <div style="font-weight:800;color:#111827">Amount Payable: ₹${(bill.payable || bill.total).toLocaleString("en-IN")}</div>
             <div style="color:#6b7280;font-size:12px">Invoice Date: ${new Date(bill.date || bill.createdAt).toLocaleDateString("en-IN")}</div>
           </div>
-          <a href="${pdfLink}" style="display:inline-block;margin:8px 0 16px;padding:12px 16px;background:#2563eb;color:#fff;text-decoration:none;border-radius:10px;font-weight:700">Download PDF</a>
+          <a href="${pdfLink}" target="_blank" style="display:inline-block;margin:8px 0 16px;padding:12px 16px;background:#2563eb;color:#fff;text-decoration:none;border-radius:10px;font-weight:700">Download PDF 📄</a>
+          <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:14px 18px; margin:16px 0; text-align:center;">
+            <div style="font-size:12px; color:#475569; line-height:1.5;">
+              For any reply, support, or issue, please contact <a href="mailto:support@smartodisha.in" style="color:#2563eb; text-decoration:underline; font-weight:700;">support@smartodisha.in</a>.
+            </div>
+          </div>
           <div style="margin-top:16px;border-top:1px solid #eee;padding-top:12px">
-            <div style="font-size:12px;color:#6b7280">&copy; ${new Date().getFullYear()} ${process.env.COMPANY_NAME || "Click2Kart"} • This is an automated email.</div>
+            <div style="font-size:12px;color:#6b7280">&copy; ${new Date().getFullYear()} ${process.env.COMPANY_NAME || "SmartOdisha"} • This is an automated email.</div>
           </div>
         </div>
       `

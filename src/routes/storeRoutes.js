@@ -260,17 +260,10 @@ router.post("/send-otp", protect, async (req, res) => {
     store.otpExpires = Date.now() + 10 * 60 * 1000; // 10 minutes
     await store.save();
 
-    // Send OTP via email (we can use sendEmail from mailer)
+    // Send OTP via email using centralized mailer
     try {
-      const { sendEmail } = await import("../lib/mailer.js");
-      await sendEmail(
-        store.email,
-        "Your OTP for Password Change",
-        `<p>Dear ${store.name},</p>
-         <p>Your OTP for password change is: <strong>${otp}</strong></p>
-         <p>This OTP is valid for 10 minutes.</p>
-         <p>If you didn't request this, please ignore this email.</p>`
-      );
+      const { sendOTP } = await import("../lib/mailer.js");
+      await sendOTP(store.email, otp, "PASSWORD_RESET");
     } catch (emailErr) {
       console.error("Failed to send OTP email:", emailErr);
     }

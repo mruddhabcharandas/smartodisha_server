@@ -5,7 +5,7 @@ import Product from "../models/Product.js";
 import Customer from "../models/Customer.js";
 import Bill from "../models/Bill.js";
 import Store from "../models/Store.js";
-import { sendEmail } from "../lib/mailer.js";
+import { sendEmail, renderMail } from "../lib/mailer.js";
 import { bumpCacheVersion, delCache } from "../lib/redis.js";
 
 import Admin from "../models/Admin.js";
@@ -488,7 +488,7 @@ router.post("/customers/:id/approve", auth, requirePermission("customers"), asyn
   if (!updated) return res.status(404).json({ error: "not_found" });
   if (updated.email) {
     try {
-      const loginUrl = `${process.env.FRONTEND_URL || "http://localhost:5173"}/login`;
+      const loginUrl = `${process.env.FRONTEND_URL || "https://smartodisha.in"}/login`;
       await sendEmail({
         to: updated.email,
         subject: `Account Approved - ${process.env.COMPANY_NAME || "SmartOdisha"}`,
@@ -499,7 +499,9 @@ router.post("/customers/:id/approve", auth, requirePermission("customers"), asyn
             { label: "Account Status", value: "Active" },
             { label: "Email", value: updated.email }
           ],
-          highlight: `<a href="${loginUrl}" style="color:inherit;text-decoration:none">Click here to Login</a>`
+          highlight: `<a href="${loginUrl}" target="_blank" style="color:#4f46e5;text-decoration:underline;font-weight:700;">Click here to Login</a>`,
+          ctaText: "Login to Your Account 🚀",
+          ctaUrl: loginUrl
         })
       });
     } catch (err) {
