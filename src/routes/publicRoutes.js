@@ -8,7 +8,7 @@ import PartnerPayout from "../models/PartnerPayout.js";
 import Partner from "../models/Partner.js";
 import HeroSlide from "../models/HeroSlide.js";
 import SystemSetting from "../models/SystemSetting.js";
-import { sendOTP, sendUserWelcomeEmail, sendSellerPayoutProcessedEmail, sendSellerWalletDeductionEmail, getZohoAccountInfo } from "../lib/mailer.js";
+import { sendOTP } from "../lib/mailer.js";
 import { getOrSetCache, getCacheVersion } from "../lib/redis.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 
@@ -209,66 +209,6 @@ router.get("/settings", async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch settings" });
-  }
-});
-
-// Diagnostic endpoint to verify Zoho Mail integration and test email templates
-router.get("/test-mail", async (req, res) => {
-  const targetEmail = req.query.to || req.query.email;
-  const type = (req.query.type || "welcome").toLowerCase().trim();
-
-  if (!targetEmail) {
-    return res.status(400).json({
-      success: false,
-      error: "Query parameter 'to' is required. Example: /api/public/test-mail?to=youremail@gmail.com&type=welcome|payout|deduct"
-    });
-  }
-
-  try {
-    const zohoInfo = await getZohoAccountInfo();
-    let result = null;
-
-    if (type === "payout") {
-      result = await sendSellerPayoutProcessedEmail({
-        sellerEmail: targetEmail,
-        sellerName: "Test Seller Partner",
-        amount: 14500,
-        referenceId: "UTR_TEST_" + Date.now().toString().slice(-6),
-        note: "Sample vendor settlement test disbursement",
-        remainingPending: 2450,
-        totalPaid: 45000,
-        bankDetails: { bankName: "State Bank of India", accountNumber: "123456789012", ifscCode: "SBIN0001234" }
-      });
-    } else if (type === "deduct" || type === "deduction") {
-      result = await sendSellerWalletDeductionEmail({
-        sellerEmail: targetEmail,
-        sellerName: "Test Seller Partner",
-        amount: 350,
-        note: "Damaged item customer return deduction",
-        remainingPending: 2100,
-        transactionId: "TX_TEST_" + Date.now().toString().slice(-6)
-      });
-    } else {
-      result = await sendUserWelcomeEmail(targetEmail, "Valued Member");
-    }
-
-    return res.json({
-      success: true,
-      typeSent: type,
-      message: `${type.toUpperCase()} test email sent successfully to ${targetEmail}!`,
-      zohoInfo: {
-        accountId: zohoInfo.accountId,
-        fromAddress: zohoInfo.primaryAddress,
-        domain: zohoInfo.domain
-      },
-      result
-    });
-  } catch (err) {
-    return res.status(500).json({
-      success: false,
-      error: err.message,
-      zohoErrorDetails: err.response?.data || null
-    });
   }
 });
 
