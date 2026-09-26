@@ -252,8 +252,11 @@ router.get('/admin/all', auth, requireRole(['admin', 'staff']), async (req, res)
     if (category && category !== 'All') filter.category = category;
 
     const tickets = await SupportTicket.find(filter)
-      .populate('customer', 'name email phone')
-      .populate('order', 'orderNumber totalEstimate paymentMethod status')
+      .populate('customer', 'name email phone createdAt')
+      .populate({
+        path: 'order',
+        select: 'orderNumber totalEstimate items shippingAddress paymentMethod paymentStatus status codDueAmount delhiveryTracking createdAt'
+      })
       .populate('assignedTo', 'name email')
       .sort({ createdAt: -1 });
 
