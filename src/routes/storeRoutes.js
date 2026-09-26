@@ -559,6 +559,47 @@ router.get("/orders", protect, async (req, res) => {
   }
 });
 
+// Sync ALL orders with Delhivery for this seller
+router.post("/orders/sync-all", protect, async (req, res) => {
+  try {
+    const { syncOrderDelhiveryStatus } = await import("../services/delhiveryTrackingSync.js");
+    const orders = await Order.find({
+      store: req.store._id,
+      $or: [
+        { "shipping.waybill": { $exists: true, $ne: "" } },
+        { delhiveryWaybill: { $exists: true, $ne: "" } }
+      ],
+      status: { $nin: ["CANCELLED"] }
+    });
+
+    let updatedCount = 0;
+    const results = [];
+
+    for (const order of orders) {
+      try {
+        const syncRes = await syncOrderDelhiveryStatus(order);
+        if (syncRes?.hasChanged) {
+          updatedCount++;
+        }
+        results.push(syncRes);
+      } catch (e) {
+        console.error(`Failed to sync order ${order._id}:`, e.message);
+        results.push({ orderId: order._id, error: e.message });
+      }
+    }
+
+    res.json({
+      success: true,
+      totalOrders: orders.length,
+      updatedCount,
+      results
+    });
+  } catch (err) {
+    console.error("Seller bulk Delhivery sync failed:", err);
+    res.status(500).json({ error: "bulk_sync_failed", message: err.message });
+  }
+});
+
 // Update order status (seller)
 router.patch("/orders/:id/status", protect, async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
