@@ -1478,6 +1478,65 @@ router.post("/:id/cancel-customer", auth, requireRole("customer"), async (req, r
   }
 });
 
+// Customer feedback after delivery
+router.post("/:id/feedback", auth, requireRole("customer"), async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  try {
+    const { rating, comment, tags } = req.body || {};
+    const r = Number(rating);
+    if (!Number.isFinite(r) || r < 1 || r > 5) {
+      return res.status(400).json({ error: "Rating must be between 1 and 5" });
+    }
+
+    const Customer = (await import("../models/Customer.js")).default;
+    const cust = await Customer.findById(req.user.id).select("phone email savedAddresses");
+    if (!cust) return res.status(404).json({ error: "customer_not_found" });
+
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const orderPhoneClean = String(order.customer?.phone || "").replace(/\D/g, "").slice(-10);
+    const orderEmail = String(order.customer?.email || "").trim().toLowerCase();
+
+    const allowedPhones = new Set();
+    if (cust.phone) allowedPhones.add(String(cust.phone).replace(/\D/g, "").slice(-10));
+    (cust.savedAddresses || []).forEach(a => {
+      if (a.phone) allowedPhones.add(String(a.phone).replace(/\D/g, "").slice(-10));
+    });
+
+    const isOwner = (orderPhoneClean && allowedPhones.has(orderPhoneClean)) || 
+                    (orderEmail && cust.email && orderEmail === String(cust.email).trim().toLowerCase());
+
+    if (!isOwner) {
+      return res.status(403).json({ error: "unauthorized" });
+    }
+
+    if (!["DELIVERED", "FULFILLED"].includes(order.status)) {
+      return res.status(400).json({ error: "Feedback can only be submitted after order delivery" });
+    }
+
+    order.feedbackRating = r;
+    order.feedbackComment = typeof comment === "string" ? comment.trim() : "";
+    if (Array.isArray(tags)) {
+      order.feedbackTags = tags.filter(t => typeof t === "string" && t.trim()).map(t => t.trim());
+    }
+    order.feedbackAt = new Date();
+    await order.save();
+
+    res.json({
+      success: true,
+      message: "Feedback submitted successfully. Thank you!",
+      feedbackRating: order.feedbackRating,
+      feedbackComment: order.feedbackComment,
+      feedbackTags: order.feedbackTags,
+      feedbackAt: order.feedbackAt
+    });
+  } catch (err) {
+    console.error("Order feedback submission error:", err);
+    res.status(500).json({ error: "feedback_failed", message: err.message });
+  }
+});
+
 // Admin status patch
 router.patch("/:id/status", auth, requirePermission("orders"), async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });

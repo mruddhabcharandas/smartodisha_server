@@ -5,44 +5,55 @@ import { auth, requireRole } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// User Routes
-// Create a new ticket
+// Helper to get consistent user/admin ID
+const getAuthId = (req) => req.user?.id || req.user?._id;
+
+// ================= USER ROUTES =================
+
+// Create a new support ticket
 router.post('/', auth, async (req, res) => {
   try {
     const { subject, description, category, orderId } = req.body;
+    const userId = getAuthId(req);
+
+    if (!subject || !description) {
+      return res.status(400).json({ error: 'Subject and description are required' });
+    }
 
     const ticket = new SupportTicket({
-      customer: req.user._id,
-      subject,
-      description,
-      category,
-      order: orderId || undefined
+      customer: userId,
+      subject: subject.trim(),
+      description: description.trim(),
+      category: category || 'Other',
+      order: orderId || undefined,
+      status: 'Open'
     });
 
     // Add initial message from user
     ticket.messages.push({
-      sender: req.user._id,
+      sender: userId,
       senderModel: 'Customer',
-      message: description
+      message: description.trim()
     });
 
     await ticket.save();
     res.status(201).json(ticket);
   } catch (err) {
-    console.error(err);
+    console.error('Error creating support ticket:', err);
     res.status(500).json({ error: 'Failed to create ticket' });
   }
 });
 
-// Get user's tickets
+// Get user's own tickets
 router.get('/my-tickets', auth, async (req, res) => {
   try {
-    const tickets = await SupportTicket.find({ customer: req.user._id })
-      .populate('order', 'orderNumber totalAmount status')
+    const userId = getAuthId(req);
+    const tickets = await SupportTicket.find({ customer: userId })
+      .populate('order', 'orderNumber totalEstimate paymentMethod status')
       .sort({ createdAt: -1 });
     res.json(tickets);
   } catch (err) {
-    console.error(err);
+    console.error('Error fetching my-tickets:', err);
     res.status(500).json({ error: 'Failed to fetch tickets' });
   }
 });
@@ -50,10 +61,11 @@ router.get('/my-tickets', auth, async (req, res) => {
 // Get single ticket by ID (user)
 router.get('/:ticketId', auth, async (req, res) => {
   try {
+    const userId = getAuthId(req);
     const ticket = await SupportTicket.findOne({
       _id: req.params.ticketId,
-      customer: req.user._id
-    }).populate('order', 'orderNumber totalAmount status items');
+      customer: userId
+    }).populate('order', 'orderNumber totalEstimate paymentMethod status items');
 
     if (!ticket) {
       return res.status(404).json({ error: 'Ticket not found' });
@@ -61,7 +73,7 @@ router.get('/:ticketId', auth, async (req, res) => {
 
     res.json(ticket);
   } catch (err) {
-    console.error(err);
+    console.error('Error fetching ticket:', err);
     res.status(500).json({ error: 'Failed to fetch ticket' });
   }
 });
@@ -70,9 +82,15 @@ router.get('/:ticketId', auth, async (req, res) => {
 router.post('/:ticketId/messages', auth, async (req, res) => {
   try {
     const { message } = req.body;
+    const userId = getAuthId(req);
+
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: 'Message cannot be empty' });
+    }
+
     const ticket = await SupportTicket.findOne({
       _id: req.params.ticketId,
-      customer: req.user._id
+      customer: userId
     });
 
     if (!ticket) {
@@ -80,13 +98,13 @@ router.post('/:ticketId/messages', auth, async (req, res) => {
     }
 
     ticket.messages.push({
-      sender: req.user._id,
+      sender: userId,
       senderModel: 'Customer',
-      message
+      message: message.trim()
     });
 
-    // If ticket was resolved, re-open it
-    if (ticket.status === 'Resolved') {
+    // If ticket was resolved or closed, re-open it on user reply
+    if (['Resolved', 'Closed'].includes(ticket.status)) {
       ticket.status = 'Open';
       ticket.resolvedAt = undefined;
     }
@@ -94,7 +112,7 @@ router.post('/:ticketId/messages', auth, async (req, res) => {
     await ticket.save();
     res.json(ticket);
   } catch (err) {
-    console.error(err);
+    console.error('Error sending user message on ticket:', err);
     res.status(500).json({ error: 'Failed to send message' });
   }
 });
@@ -102,9 +120,10 @@ router.post('/:ticketId/messages', auth, async (req, res) => {
 // Mark ticket as resolved (user)
 router.put('/:ticketId/resolve', auth, async (req, res) => {
   try {
+    const userId = getAuthId(req);
     const ticket = await SupportTicket.findOne({
       _id: req.params.ticketId,
-      customer: req.user._id
+      customer: userId
     });
 
     if (!ticket) {
@@ -114,43 +133,40 @@ router.put('/:ticketId/resolve', auth, async (req, res) => {
     ticket.status = 'Resolved';
     ticket.resolvedAt = new Date();
 
-    // Delete messages except basic ticket info
-    // We'll keep the ticket but clear the messages as requested
-    ticket.messages = [];
-
     await ticket.save();
     res.json(ticket);
   } catch (err) {
-    console.error(err);
+    console.error('Error resolving ticket:', err);
     res.status(500).json({ error: 'Failed to resolve ticket' });
   }
 });
 
-// Admin Routes
-// Get all tickets
-router.get('/admin/all', auth, requireRole('admin'), async (req, res) => {
+// ================= ADMIN ROUTES =================
+
+// Get all tickets (admin / staff)
+router.get('/admin/all', auth, requireRole(['admin', 'staff']), async (req, res) => {
   try {
     const { status, category } = req.query;
     const filter = {};
 
-    if (status) filter.status = status;
-    if (category) filter.category = category;
+    if (status && status !== 'All') filter.status = status;
+    if (category && category !== 'All') filter.category = category;
 
     const tickets = await SupportTicket.find(filter)
       .populate('customer', 'name email phone')
-      .populate('order', 'orderNumber totalAmount')
+      .populate('order', 'orderNumber totalEstimate paymentMethod status')
       .populate('assignedTo', 'name email')
       .sort({ createdAt: -1 });
 
     res.json(tickets);
   } catch (err) {
-    console.error(err);
+    console.error('Error fetching admin tickets:', err);
     res.status(500).json({ error: 'Failed to fetch tickets' });
   }
 });
 
 // Update ticket status (admin)
-router.put('/admin/:ticketId/status', auth, requireRole('admin'), async (req, res) => {
+router.put('/admin/:ticketId/status', auth, requireRole(['admin', 'staff']), async (req, res) => {
   try {
     const { status } = req.body;
     const ticket = await SupportTicket.findById(req.params.ticketId);
@@ -163,36 +179,37 @@ router.put('/admin/:ticketId/status', auth, requireRole('admin'), async (req, re
 
     if (status === 'Resolved') {
       ticket.resolvedAt = new Date();
-      // Clear messages when resolved as requested
-      ticket.messages = [];
-    }
-
-    if (status === 'Closed') {
+    } else if (status === 'Closed') {
       ticket.closedAt = new Date();
     }
 
     await ticket.save();
     res.json(ticket);
   } catch (err) {
-    console.error(err);
+    console.error('Error updating ticket status:', err);
     res.status(500).json({ error: 'Failed to update ticket' });
   }
 });
 
-// Add admin message to ticket
-router.post('/admin/:ticketId/messages', auth, requireRole('admin'), async (req, res) => {
+// Add admin reply message to ticket
+router.post('/admin/:ticketId/messages', auth, requireRole(['admin', 'staff']), async (req, res) => {
   try {
     const { message } = req.body;
-    const ticket = await SupportTicket.findById(req.params.ticketId);
+    const adminId = getAuthId(req);
 
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: 'Message cannot be empty' });
+    }
+
+    const ticket = await SupportTicket.findById(req.params.ticketId);
     if (!ticket) {
       return res.status(404).json({ error: 'Ticket not found' });
     }
 
     ticket.messages.push({
-      sender: req.admin._id,
+      sender: adminId,
       senderModel: 'Admin',
-      message
+      message: message.trim()
     });
 
     if (ticket.status === 'Open') {
@@ -200,9 +217,15 @@ router.post('/admin/:ticketId/messages', auth, requireRole('admin'), async (req,
     }
 
     await ticket.save();
-    res.json(ticket);
+
+    // Return populated ticket
+    const populated = await SupportTicket.findById(ticket._id)
+      .populate('customer', 'name email phone')
+      .populate('order', 'orderNumber totalEstimate paymentMethod status');
+
+    res.json(populated);
   } catch (err) {
-    console.error(err);
+    console.error('Error sending admin ticket reply:', err);
     res.status(500).json({ error: 'Failed to send message' });
   }
 });
@@ -217,11 +240,11 @@ router.put('/admin/:ticketId/assign', auth, requireRole('admin'), async (req, re
       return res.status(404).json({ error: 'Ticket not found' });
     }
 
-    ticket.assignedTo = adminId;
+    ticket.assignedTo = adminId || undefined;
     await ticket.save();
     res.json(ticket);
   } catch (err) {
-    console.error(err);
+    console.error('Error assigning ticket:', err);
     res.status(500).json({ error: 'Failed to assign ticket' });
   }
 });

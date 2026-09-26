@@ -846,20 +846,29 @@ router.post("/:id/reviews", auth, async (req, res) => {
   const billEligible = await Bill.exists({ customer: req.user?.id, "items.product": product._id });
   let orderEligible = false;
   if (!billEligible && req.user?.id) {
-    const cust = await Customer.findById(req.user.id).select("phone").lean();
-    const phone = cust?.phone ? String(cust.phone).replace(/\D/g, "").slice(-10) : "";
-    if (phone.length === 10) {
-      const recent = await Order.find({
-        "items.product": product._id,
-        status: { $in: ["DELIVERED", "FULFILLED", "SHIPPED", "CONFIRMED"] }
-      })
-        .select("customer.phone")
-        .sort({ createdAt: -1 })
-        .limit(80)
-        .lean();
-      orderEligible = recent.some(
-        (o) => String(o.customer?.phone || "").replace(/\D/g, "").slice(-10) === phone
-      );
+    const cust = await Customer.findById(req.user.id).select("phone email savedAddresses").lean();
+    if (cust) {
+      const phones = new Set();
+      if (cust.phone) phones.add(String(cust.phone).replace(/\D/g, "").slice(-10));
+      (cust.savedAddresses || []).forEach(a => {
+        if (a.phone) phones.add(String(a.phone).replace(/\D/g, "").slice(-10));
+      });
+      const phoneList = Array.from(phones).filter(p => p.length === 10);
+      const orClauses = [];
+      if (phoneList.length > 0) {
+        orClauses.push({ "customer.phone": { $in: phoneList.map(p => new RegExp(p + "$")) } });
+      }
+      if (cust.email) {
+        orClauses.push({ "customer.email": cust.email.toLowerCase().trim() });
+      }
+      if (orClauses.length > 0) {
+        const foundOrder = await Order.findOne({
+          "items.product": product._id,
+          status: { $in: ["DELIVERED", "FULFILLED", "SHIPPED", "CONFIRMED"] },
+          $or: orClauses
+        }).select("_id").lean();
+        if (foundOrder) orderEligible = true;
+      }
     }
   }
   if (!billEligible && !orderEligible) return res.status(403).json({ error: "not_eligible" });
