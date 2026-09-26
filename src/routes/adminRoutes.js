@@ -1,6 +1,6 @@
 import express from "express";
 import mongoose from "mongoose";
-import { auth, requireRole, requirePermission } from "../middleware/auth.js";
+import { auth, requireRole, requirePermission, verifyAdminDeletePassword } from "../middleware/auth.js";
 import Product from "../models/Product.js";
 import Customer from "../models/Customer.js";
 import Bill from "../models/Bill.js";
@@ -156,7 +156,7 @@ router.put("/stores/:id", auth, requireRole("admin"), async (req, res) => {
 });
 
 // Delete store
-router.delete("/stores/:id", auth, requireRole("admin"), async (req, res) => {
+router.delete("/stores/:id", auth, requireRole("admin"), verifyAdminDeletePassword, async (req, res) => {
   try {
     const store = await Store.findByIdAndDelete(req.params.id);
     if (!store) {
@@ -286,7 +286,7 @@ router.put("/staff/:id", auth, requireRole("admin"), async (req, res) => {
 });
 
 // Delete staff
-router.delete("/staff/:id", auth, requireRole("admin"), async (req, res) => {
+router.delete("/staff/:id", auth, requireRole("admin"), verifyAdminDeletePassword, async (req, res) => {
   await Admin.findByIdAndDelete(req.params.id);
   res.json({ deleted: true });
 });
@@ -475,7 +475,7 @@ router.get("/customers/:id", auth, requirePermission("customers"), async (req, r
   res.json({ user, orders, bills });
 });
 
-router.delete("/customers/:id", auth, requireRole("admin"), async (req, res) => {
+router.delete("/customers/:id", auth, requireRole("admin"), verifyAdminDeletePassword, async (req, res) => {
   const id = req.params.id;
   const removed = await Customer.findByIdAndDelete(id);
   if (!removed) return res.status(404).json({ error: "not_found" });
@@ -671,7 +671,7 @@ router.post("/hero-slides", auth, requireRole("admin"), async (req, res) => {
   }
 });
 
-router.delete("/hero-slides/:id", auth, requireRole("admin"), async (req, res) => {
+router.delete("/hero-slides/:id", auth, requireRole("admin"), verifyAdminDeletePassword, async (req, res) => {
   try {
     const HeroSlide = (await import("../models/HeroSlide.js")).default;
     const { deleteFile } = await import("../lib/s3.js");
@@ -799,7 +799,7 @@ router.post("/store-requests/:id/approve", auth, requireRole("admin"), async (re
 });
 
 // Delete a store request
-router.delete("/store-requests/:id", auth, requireRole("admin"), async (req, res) => {
+router.delete("/store-requests/:id", auth, requireRole("admin"), verifyAdminDeletePassword, async (req, res) => {
   try {
     const StoreRequest = (await import("../models/StoreRequest.js")).default;
     const request = await StoreRequest.findById(req.params.id);
@@ -810,6 +810,23 @@ router.delete("/store-requests/:id", auth, requireRole("admin"), async (req, res
   } catch (err) {
     console.error("Failed to delete request:", err);
     res.status(500).json({ error: "Failed to delete request" });
+  }
+});
+
+// Verify admin password endpoint
+router.post("/verify-password", auth, async (req, res) => {
+  try {
+    const { password } = req.body || {};
+    if (!password) return res.status(400).json({ error: "Password is required", valid: false });
+    const adminId = req.user?.id || req.user?._id;
+    const admin = await Admin.findById(adminId);
+    if (!admin) return res.status(404).json({ error: "Admin account not found", valid: false });
+    const isMatch = await admin.comparePassword(password);
+    if (!isMatch) return res.status(401).json({ error: "Incorrect password", valid: false });
+    return res.json({ valid: true, message: "Password verified" });
+  } catch (err) {
+    console.error("Verify admin password failed:", err);
+    return res.status(500).json({ error: "Failed to verify password", valid: false });
   }
 });
 

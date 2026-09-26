@@ -189,6 +189,53 @@ const protect = async (req, res, next) => {
   }
 };
 
+// Middleware to verify seller's password before any deletion
+const verifySellerDeletePassword = async (req, res, next) => {
+  try {
+    const password =
+      req.headers["x-action-password"] ||
+      req.headers["x-password"] ||
+      req.body?.password ||
+      req.body?.currentPassword ||
+      req.query?.password;
+
+    if (!password) {
+      return res.status(400).json({ error: "Seller password is required to authorize deletion" });
+    }
+
+    const store = await Store.findById(req.store._id);
+    if (!store) {
+      return res.status(404).json({ error: "Store account not found" });
+    }
+
+    const isMatch = await store.comparePassword(password);
+    if (!isMatch) {
+      return res.status(401).json({ error: "Incorrect seller password. Deletion cancelled." });
+    }
+
+    next();
+  } catch (err) {
+    console.error("Seller delete password verification error:", err);
+    return res.status(500).json({ error: "Password verification failed" });
+  }
+};
+
+// Verify seller password endpoint
+router.post("/verify-password", protect, async (req, res) => {
+  try {
+    const { password } = req.body || {};
+    if (!password) return res.status(400).json({ error: "Password is required", valid: false });
+    const store = await Store.findById(req.store._id);
+    if (!store) return res.status(404).json({ error: "Store not found", valid: false });
+    const isMatch = await store.comparePassword(password);
+    if (!isMatch) return res.status(401).json({ error: "Incorrect password", valid: false });
+    return res.json({ valid: true, message: "Password verified" });
+  } catch (err) {
+    console.error("Verify seller password failed:", err);
+    return res.status(500).json({ error: "Failed to verify password", valid: false });
+  }
+});
+
 // Get current store profile
 router.get("/profile", protect, async (req, res) => {
   try {
@@ -1407,7 +1454,7 @@ router.put("/products/:id", protect, async (req, res) => {
   }
 });
 
-router.delete("/products/:id", protect, async (req, res) => {
+router.delete("/products/:id", protect, verifySellerDeletePassword, async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
     
@@ -1606,7 +1653,7 @@ router.put("/products/:id/variants/:vid", protect, async (req, res) => {
   }
 });
 
-router.delete("/products/:id/variants/:vid", protect, async (req, res) => {
+router.delete("/products/:id/variants/:vid", protect, verifySellerDeletePassword, async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
     const p = await Product.findById(req.params.id);

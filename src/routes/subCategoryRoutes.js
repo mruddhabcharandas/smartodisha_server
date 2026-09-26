@@ -1,7 +1,7 @@
 import express from "express";
 import mongoose from "mongoose";
 import SubCategory from "../models/SubCategory.js";
-import { auth, requireRole, requirePermission } from "../middleware/auth.js";
+import { auth, requireRole, requirePermission, verifyAdminDeletePassword } from "../middleware/auth.js";
 
 const router = express.Router();
 
@@ -47,7 +47,7 @@ router.put("/:id", auth, requireRole("admin"), async (req, res) => {
   res.json(updated);
 });
 
-router.delete("/:id", auth, requireRole("admin"), async (req, res) => {
+router.delete("/:id", auth, requireRole("admin"), verifyAdminDeletePassword, async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
   const updated = await SubCategory.findByIdAndUpdate(req.params.id, { isActive: false }, { new: true });
   if (!updated) return res.status(404).json({ error: "not_found" });

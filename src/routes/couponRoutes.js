@@ -1,7 +1,7 @@
 import express from "express";
 import mongoose from "mongoose";
 import Coupon from "../models/Coupon.js";
-import { auth, requireRole } from "../middleware/auth.js";
+import { auth, requireRole, verifyAdminDeletePassword } from "../middleware/auth.js";
 
 const router = express.Router();
 
@@ -160,7 +160,7 @@ router.post("/validate", auth, async (req, res) => {
   });
 });
 
-router.delete("/:id", auth, requireRole("admin"), async (req, res) => {
+router.delete("/:id", auth, requireRole("admin"), verifyAdminDeletePassword, async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
   
   const coupon = await Coupon.findById(req.params.id);

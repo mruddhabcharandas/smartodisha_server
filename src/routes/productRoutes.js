@@ -4,7 +4,7 @@ import Product from "../models/Product.js";
 import Store from "../models/Store.js";
 import AuditLog from "../models/AuditLog.js";
 import Category from "../models/Category.js";
-import { auth, requireRole, requirePermission } from "../middleware/auth.js";
+import { auth, requireRole, requirePermission, verifyAdminDeletePassword } from "../middleware/auth.js";
 import StockTxn from "../models/StockTxn.js";
 import Bill from "../models/Bill.js";
 import Order from "../models/Order.js";
@@ -732,7 +732,7 @@ router.put("/:id/variants/:vid", auth, requirePermission("products"), async (req
   res.json(v);
 });
 
-router.delete("/:id/variants/:vid", auth, requirePermission("products"), async (req, res) => {
+router.delete("/:id/variants/:vid", auth, requirePermission("products"), verifyAdminDeletePassword, async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
   const p = await Product.findById(req.params.id);
   if (!p || !p.isActive) return res.status(404).json({ error: "not_found" });
@@ -781,7 +781,7 @@ router.patch("/:id/variants/:vid/stock", auth, requirePermission("inventory"), a
   res.json({ id: v._id.toString(), stock: v.stock });
 });
 
-router.delete("/:id", auth, requirePermission("products"), async (req, res) => {
+router.delete("/:id", auth, requirePermission("products"), verifyAdminDeletePassword, async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
   const updated = await Product.findByIdAndUpdate(req.params.id, { isActive: false }, { new: true });
   if (!updated) return res.status(404).json({ error: "not_found" });

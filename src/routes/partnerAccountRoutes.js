@@ -1,6 +1,6 @@
 import express from "express";
 import mongoose from "mongoose";
-import { auth, requireRole } from "../middleware/auth.js";
+import { auth, requireRole, verifyAdminDeletePassword } from "../middleware/auth.js";
 import Partner from "../models/Partner.js";
 
 const router = express.Router();
@@ -33,6 +33,13 @@ router.put("/:id", auth, requireRole("admin"), async (req, res) => {
   const updated = await Partner.findByIdAndUpdate(req.params.id, payload, { new: true });
   if (!updated) return res.status(404).json({ error: "not_found" });
   res.json(updated);
+});
+
+router.delete("/:id", auth, requireRole("admin"), verifyAdminDeletePassword, async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "invalid_id" });
+  const doc = await Partner.findByIdAndUpdate(req.params.id, { isActive: false }, { new: true });
+  if (!doc) return res.status(404).json({ error: "not_found" });
+  res.json({ message: "Partner removed successfully" });
 });
 
 export default router;

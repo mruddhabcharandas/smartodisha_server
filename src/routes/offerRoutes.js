@@ -1,6 +1,6 @@
 import express from "express";
 import Offer from "../models/Offer.js";
-import { auth, requireRole } from "../middleware/auth.js";
+import { auth, requireRole, verifyAdminDeletePassword } from "../middleware/auth.js";
 
 const router = express.Router();
 
@@ -32,7 +32,7 @@ router.put("/:id", auth, requireRole("admin"), async (req, res) => {
   }
 });
 
-router.delete("/:id", auth, requireRole("admin"), async (req, res) => {
+router.delete("/:id", auth, requireRole("admin"), verifyAdminDeletePassword, async (req, res) => {
   await Offer.findByIdAndDelete(req.params.id);
   res.json({ success: true });
 });
