@@ -1,7 +1,8 @@
 import axios from "axios";
   
 async function getAccessToken() {
-  const res = await axios.post("https://accounts.zoho.in/oauth/v2/token", null, {
+  const domain = (process.env.ZOHO_DOMAIN || "in").toLowerCase();
+  const res = await axios.post(`https://accounts.zoho.${domain}/oauth/v2/token`, null, {
     params: {
       refresh_token: process.env.ZOHO_REFRESH_TOKEN,
       client_id: process.env.ZOHO_CLIENT_ID,
@@ -15,9 +16,10 @@ async function getAccessToken() {
 export const sendEmail = async ({ to, subject, text, html }) => {
   const content = html || (text ? `<pre>${text}</pre>` : "");
   try {
+    const domain = (process.env.ZOHO_DOMAIN || "in").toLowerCase();
     const accessToken = await getAccessToken();
     await axios.post(
-      `https://mail.zoho.in/api/accounts/${process.env.ZOHO_ACCOUNT_ID}/messages`,
+      `https://mail.zoho.${domain}/api/accounts/${process.env.ZOHO_ACCOUNT_ID}/messages`,
       {
         fromAddress: `${process.env.MAIL_FROM_NAME || process.env.COMPANY_NAME || "SmartOdisha"} <${process.env.ZOHO_MAIL_FROM}>`,
         toAddress: to,

@@ -1,4 +1,5 @@
 import express from "express";
+import axios from "axios";
 import cors from "cors";
 import morgan from "morgan";
 import dotenv from "dotenv";
@@ -66,6 +67,104 @@ app.use(express.static(publicDir));
 
 app.get("/api/health", (req, res) => {
   res.json({ status: "uddhab das", time: new Date().toISOString() });
+});
+
+app.get("/oauth/callback", async (req, res) => {
+  const { code, error, location } = req.query;
+  if (error) {
+    return res.status(400).send(`
+      <div style="font-family:sans-serif;padding:30px;max-width:500px;margin:auto;">
+        <h3 style="color:#ef4444">OAuth Authorization Error</h3>
+        <pre style="background:#f1f5f9;padding:12px;border-radius:8px">${error}</pre>
+      </div>
+    `);
+  }
+  if (!code) {
+    return res.send(`
+      <div style="font-family:sans-serif;padding:30px;max-width:500px;margin:auto;">
+        <h3 style="color:#0f172a">OAuth Callback Ready</h3>
+        <p style="color:#64748b">Server is ready to receive OAuth redirect codes.</p>
+      </div>
+    `);
+  }
+
+  let refreshToken = null;
+  let exchangeError = null;
+
+  const clientId = process.env.ZOHO_CLIENT_ID;
+  const clientSecret = process.env.ZOHO_CLIENT_SECRET;
+  const domain = (process.env.ZOHO_DOMAIN || (location === "us" || location === "com" ? "com" : "in")).toLowerCase();
+
+  if (clientId && clientSecret) {
+    try {
+      const resp = await axios.post(`https://accounts.zoho.${domain}/oauth/v2/token`, null, {
+        params: {
+          code,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: "https://smartodisha-server.onrender.com/oauth/callback",
+          grant_type: "authorization_code"
+        }
+      });
+      if (resp.data?.refresh_token) {
+        refreshToken = resp.data.refresh_token;
+      } else if (resp.data?.error) {
+        exchangeError = resp.data.error;
+      }
+    } catch (e) {
+      exchangeError = e.response?.data?.error || e.message;
+    }
+  }
+
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>Zoho Authorization Code</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 30px 16px; margin: 0; display: flex; justify-content: center; }
+          .card { background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 24px; max-width: 640px; width: 100%; box-shadow: 0 10px 25px rgba(0,0,0,0.4); }
+          h2 { color: #38bdf8; margin: 0 0 12px; font-size: 20px; }
+          p { color: #94a3b8; font-size: 13px; margin: 0 0 16px; line-height: 1.5; }
+          .code-box { background: #090d16; border: 1px solid #475569; padding: 12px 14px; border-radius: 8px; font-family: monospace; font-size: 12px; color: #4ade80; word-break: break-all; margin-bottom: 12px; }
+          .btn { background: #3b82f6; color: #fff; border: none; padding: 8px 16px; border-radius: 8px; font-weight: 700; font-size: 12px; cursor: pointer; }
+          .btn:hover { background: #2563eb; }
+          .token-box { background: rgba(34, 197, 94, 0.1); border: 1px solid #22c55e; padding: 16px; border-radius: 12px; margin-top: 20px; }
+          .token-val { color: #facc15; font-weight: bold; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h2>✅ Authorization Code Received!</h2>
+          <p>Zoho has verified your request and returned the code below:</p>
+          <div class="code-box" id="codeText">${code}</div>
+          <button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('codeText').innerText); alert('Code copied to clipboard!');">📋 Copy Code</button>
+
+          ${refreshToken ? `
+            <div class="token-box">
+              <h3 style="color: #4ade80; margin: 0 0 8px; font-size: 16px;">🎉 Refresh Token Generated Automatically!</h3>
+              <p style="color: #cbd5e1;">Copy this value and set it in your Render environment variables or server <code>.env</code> file:</p>
+              <div class="code-box token-val" id="rtText">ZOHO_REFRESH_TOKEN=${refreshToken}</div>
+              <button class="btn" style="background:#16a34a" onclick="navigator.clipboard.writeText('${refreshToken}'); alert('Refresh token copied to clipboard!');">📋 Copy Refresh Token</button>
+            </div>
+          ` : `
+            <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid #334155;">
+              <p style="color: #cbd5e1; font-weight: 600; margin-bottom: 6px;">Next Step to get Refresh Token:</p>
+              <p style="font-size: 12px;">Run this command in your terminal / Postman to exchange this code for your permanent <code>ZOHO_REFRESH_TOKEN</code>:</p>
+              <div class="code-box" style="color: #38bdf8;">curl -X POST "https://accounts.zoho.${domain}/oauth/v2/token" \\<br/>
+  -d "code=${code}" \\<br/>
+  -d "client_id=YOUR_CLIENT_ID" \\<br/>
+  -d "client_secret=YOUR_CLIENT_SECRET" \\<br/>
+  -d "redirect_uri=https://smartodisha-server.onrender.com/oauth/callback" \\<br/>
+  -d "grant_type=authorization_code"</div>
+              ${exchangeError ? `<p style="color: #f87171; font-size: 11px;">Note: Auto-exchange attempt returned: ${JSON.stringify(exchangeError)}</p>` : ''}
+            </div>
+          `}
+        </div>
+      </body>
+    </html>
+  `);
 });
 
 app.use("/api/products", productRoutes);
