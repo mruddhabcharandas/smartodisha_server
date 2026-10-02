@@ -249,6 +249,49 @@ const getFallbackShippingCost = ({ weight, orderAmount, paymentMethod, freeDeliv
 };
 
 /**
+ * Query Delhivery tracking API by client order ID
+ */
+export const getShipmentByOrderId = async (orderId) => {
+  const b = base();
+  if (!b || !token() || !orderId) return null;
+
+  const cleanId = String(orderId).trim();
+  const url = `${b}/api/v1/packages/json/?ref_ids=${encodeURIComponent(cleanId)}`;
+  console.log("Querying Delhivery shipment by Order ID:", url);
+
+  try {
+    const res = await fetch(url, { headers: authHeader() });
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    let shipmentObj = null;
+
+    if (Array.isArray(data?.ShipmentData) && data.ShipmentData.length > 0) {
+      shipmentObj = data.ShipmentData[0]?.Shipment || data.ShipmentData[0];
+    } else if (data?.ShipmentData?.Shipment) {
+      shipmentObj = Array.isArray(data.ShipmentData.Shipment) ? data.ShipmentData.Shipment[0] : data.ShipmentData.Shipment;
+    } else if (Array.isArray(data?.packages) && data.packages.length > 0) {
+      shipmentObj = data.packages[0];
+    } else if (data?.shipment) {
+      shipmentObj = data.shipment;
+    }
+
+    const waybill = shipmentObj?.AWB || shipmentObj?.waybill || shipmentObj?.Waybill || shipmentObj?.wbn || null;
+    if (waybill) {
+      return {
+        waybill: String(waybill).trim(),
+        status: shipmentObj?.Status?.Status || shipmentObj?.Status || shipmentObj?.status || "Manifested",
+        shipment: shipmentObj,
+        raw: data
+      };
+    }
+  } catch (err) {
+    console.warn("getShipmentByOrderId error:", err.message);
+  }
+  return null;
+};
+
+/**
  * Create a shipment in Delhivery
  */
 export const createShipment = async (shipmentData) => {
@@ -310,9 +353,23 @@ export const createShipment = async (shipmentData) => {
     
     // Set required fields with defaults
     s.total_amount = Math.max(1, Number(s.total_amount) || 1);
-    s.order_date = new Date().toISOString().slice(0, 10);
+    s.order_date = s.order_date || new Date().toISOString().slice(0, 10);
     s.weight = Number(s.weight || DEFAULT_WEIGHT);
     
+    // Normalize payment mode and COD amount for Delhivery
+    if (String(s.payment_mode || "").toUpperCase() === "COD") {
+      s.payment_mode = "COD";
+      const numCod = Number(s.cod_amount);
+      if (!numCod || numCod <= 0) {
+        s.cod_amount = Math.max(1, Number(s.total_amount) || 1);
+      } else {
+        s.cod_amount = numCod;
+      }
+    } else {
+      s.payment_mode = "Pre-paid";
+      delete s.cod_amount;
+    }
+
     // Validate required Delhivery fields
     const requiredFields = [
       'name',      // Customer name
@@ -377,17 +434,46 @@ export const createShipment = async (shipmentData) => {
       return { raw: text };
     }
     
+    // 1. Extract waybill from standard response fields
+    let waybill = json?.packages?.[0]?.waybill || json?.packages?.[0]?.wbn || json?.packages?.[0]?.awb || json?.upload_wbn || json?.shipments?.[0]?.waybill || "";
+
+    // 2. Check for errors or duplicate in response
+    const pkg = json?.packages?.[0];
+    const isPackageFailed = pkg && (pkg.status === "Fail" || pkg.status === "Failed");
+    const combinedRemarks = [
+      json?.rmk,
+      json?.error,
+      pkg?.remarks ? (Array.isArray(pkg.remarks) ? pkg.remarks.join(" ") : String(pkg.remarks)) : ""
+    ].filter(Boolean).join(" ");
+
+    const isDuplicate = /already\s*exist|duplicate/i.test(combinedRemarks);
+
+    if (!waybill && isDuplicate) {
+      // Check if waybill is in remarks string
+      const wbnMatch = combinedRemarks.match(/\b\d{12,14}\b/);
+      if (wbnMatch) {
+        waybill = wbnMatch[0];
+      } else if (s.order) {
+        // Query Delhivery tracking API by client order ID to fetch already-created waybill
+        const existing = await getShipmentByOrderId(s.order);
+        if (existing?.waybill) {
+          waybill = existing.waybill;
+        }
+      }
+    }
+
+    if (waybill) {
+      json.waybill = waybill;
+      json.success = true;
+      return json;
+    }
+
     // Check for errors in response
-    if (json?.success === false || json?.error) {
-      const errorMsg = json?.rmk || json?.error || "Delhivery shipment creation failed";
+    if (json?.success === false || json?.error || isPackageFailed) {
+      const errorMsg = combinedRemarks || json?.rmk || json?.error || "Delhivery shipment creation failed";
       throw new Error(errorMsg);
     }
-    
-    // Extract waybill if available
-    if (json?.packages?.[0]?.waybill) {
-      json.waybill = json.packages[0].waybill;
-    }
-    
+
     return json;
     
   } catch (err) {
@@ -750,6 +836,7 @@ export default {
   checkServiceability,
   calculateShippingCost,
   createShipment,
+  getShipmentByOrderId,
   trackShipment,
   generateLabel,
   cancelShipment,

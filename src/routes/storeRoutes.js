@@ -664,7 +664,8 @@ router.patch("/orders/:id/pack", protect, async (req, res) => {
 
     res.json(order);
   } catch (err) {
-    res.status(500).json({ error: "pack_failed" });
+    console.error("Seller mark packed failed:", err);
+    res.status(500).json({ error: "pack_failed", message: err.message });
   }
 });
 
@@ -862,8 +863,15 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
     const order = await Order.findOne({ _id: req.params.id, store: req.store._id });
     if (!order) return res.status(404).json({ error: "order_not_found" });
 
+    // If shipment was already created and waybill is present, return it immediately
+    if (order.delhiveryWaybill || order.shipping?.waybill) {
+      const waybill = order.delhiveryWaybill || order.shipping.waybill;
+      const trackingUrl = order.shipping?.trackingUrl || `https://www.delhivery.com/track/package/${waybill}`;
+      return res.json({ success: true, waybill, trackingUrl, status: order.status, message: "Shipment already exists for this order." });
+    }
+
     const Customer = (await import("../models/Customer.js")).default;
-    const { createShipment, checkServiceability, createWarehouse } = await import("../services/delhivery.service.js");
+    const { createShipment, checkServiceability, createWarehouse, getShipmentByOrderId } = await import("../services/delhivery.service.js");
 
     let pickupPincode = req.store.pickupAddress?.pincode || process.env.DELHIVERY_PICKUP_PINCODE || "360001";
     const baseLocationName = req.store.name || "Warehouse";
@@ -953,6 +961,14 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
     // Helper to sanitize strings (trim, remove extra spaces)
     const sanitize = (s) => String(s || "").trim();
 
+    const isCod = order.paymentMethod === "COD";
+    const codDue = Number(order.codDueAmount || 0);
+    const totalEst = Number(order.totalEstimate || 0);
+    const codAmount = isCod
+      ? Math.max(1, codDue > 0 ? codDue : (totalEst > 0 ? Math.round(totalEst * 0.85) : 1))
+      : 0;
+    const finalTotalAmount = Math.max(1, totalEst > 0 ? totalEst : (codAmount || 1));
+
     const shipmentData = {
       format: "json",
       data: {
@@ -968,7 +984,7 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
             pin: sanitize(addr.pincode),
             state: sanitize(addr.state),
             order: order._id.toString(),
-            payment_mode: order.paymentMethod === "COD" ? "COD" : "Prepaid",
+            payment_mode: isCod ? "COD" : "Pre-paid",
             shipping_mode: "Surface",
             return_name: sanitize(pickupName),
             return_address: sanitize(pickupAddressLine),
@@ -978,8 +994,7 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
             return_phone: sanitize(pickupPhone),
             products_desc: sanitize(orderItems.map(i => i.name).join(", ")),
             order_date: new Date().toISOString().split("T")[0],
-            // Use the actual totalEstimate (includes shipping, COD fees, and applies coupon discount)
-            total_amount: Number(order.totalEstimate || 0),
+            total_amount: finalTotalAmount,
             seller_name: sanitize(pickupName),
             seller_add: sanitize(pickupAddressLine),
             seller_city: sanitize(pickupCity),
@@ -991,7 +1006,6 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
             ewaybill_date: "",
             ewaybill_validity: "",
             ewaybill_value: 0,
-            // Add weight (required by Delhivery)
             weight: Number(weightKg.toFixed(2)),
             products: orderItems.map(item => ({
               ...item,
@@ -1008,16 +1022,41 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
       }
     };
 
-    if (order.paymentMethod === "COD") {
-      shipmentData.data.shipments[0].cod_amount = Number(order.codDueAmount || 0);
-      shipmentData.data.shipments[0].total_amount = Number(order.totalEstimate || 0);
+    if (isCod) {
+      shipmentData.data.shipments[0].cod_amount = codAmount;
+      shipmentData.data.shipments[0].total_amount = finalTotalAmount;
     }
 
     console.log("Sending to Delhivery:", JSON.stringify(shipmentData, null, 2));
-    const result = await createShipment(shipmentData);
-    console.log("Delhivery response:", result);
+    
+    let result = null;
+    let waybill = '';
+    try {
+      result = await createShipment(shipmentData);
+      console.log("Delhivery response:", result);
+      waybill = result?.waybill || result?.packages?.[0]?.waybill || result?.packages?.[0]?.wbn || result?.shipments?.[0]?.waybill || result?.upload_wbn || '';
+    } catch (createErr) {
+      console.warn("Seller Delhivery createShipment error:", createErr.message);
+      const errStr = String(createErr.message || "");
+      const wbnMatch = errStr.match(/\b\d{12,14}\b/);
+      if (wbnMatch) {
+        waybill = wbnMatch[0];
+      } else if (/already\s*exist|duplicate/i.test(errStr)) {
+        const existing = await getShipmentByOrderId(order._id.toString()) || (order.orderNumber ? await getShipmentByOrderId(order.orderNumber) : null);
+        if (existing?.waybill) {
+          waybill = existing.waybill;
+        }
+      }
+      if (!waybill) throw createErr;
+    }
 
-    const waybill = result?.packages?.[0]?.waybill || result?.shipments?.[0]?.waybill || '';
+    // Secondary check if waybill not yet populated
+    if (!waybill) {
+      const existing = await getShipmentByOrderId(order._id.toString()) || (order.orderNumber ? await getShipmentByOrderId(order.orderNumber) : null);
+      if (existing?.waybill) {
+        waybill = existing.waybill;
+      }
+    }
     
     if (waybill) {
       const trackingUrl = `https://www.delhivery.com/track/package/${waybill}`;
@@ -1059,7 +1098,7 @@ router.post("/orders/:id/delhivery/create", protect, async (req, res) => {
     return res.status(400).json({ error: "shipment_creation_failed", message: "Failed to generate waybill from Delhivery.", details: result });
   } catch (err) {
     console.error("Seller Delhivery create failed:", err.message || err);
-    res.status(502).json({ error: "shipment_creation_failed", message: err.message });
+    res.status(502).json({ error: "shipment_creation_failed", message: err.message || "Failed to create shipment with Delhivery" });
   }
 });
 

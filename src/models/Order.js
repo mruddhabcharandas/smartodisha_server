@@ -36,14 +36,32 @@ const orderSchema = new mongoose.Schema(
     couponCode: { type: String, default: "" },
     couponDiscount: { type: Number, default: 0 },
     paymentMethod: { type: String, enum: ["CASHFREE", "MANUAL", "COD"], default: "CASHFREE" },
-    paymentStatus: { type: String, enum: ["PENDING", "PAID", "FAILED", "REFUNDED"], default: "PENDING" },
+    paymentStatus: { 
+      type: String, 
+      enum: ["PENDING", "PAID", "PARTIAL_PAID", "PARTIALLY_PAID", "FAILED", "REFUNDED", "PARTIALLY_REFUNDED"], 
+      default: "PENDING" 
+    },
     cashfreeOrderId: { type: String },
     cashfreePaymentId: { type: String },
     cashfreeSignature: { type: String },
     codDueAmount: { type: Number, default: 0 },
     status: { 
       type: String, 
-      enum: ["PENDING", "PENDING_PAYMENT", "CONFIRMED", "PROCESSING", "PACKED", "SHIPPED", "OUT_FOR_DELIVERY", "DELIVERED", "CANCELLED", "RETURNED"], 
+      enum: [
+        "PENDING", 
+        "PENDING_PAYMENT", 
+        "PENDING_CASH_APPROVAL",
+        "NEW",
+        "CONFIRMED", 
+        "PROCESSING", 
+        "PACKED", 
+        "SHIPPED", 
+        "OUT_FOR_DELIVERY", 
+        "DELIVERED", 
+        "FULFILLED", 
+        "CANCELLED", 
+        "RETURNED"
+      ], 
       default: "PENDING" 
     },
     notes: { type: String, default: "" },

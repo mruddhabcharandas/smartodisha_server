@@ -288,6 +288,14 @@ router.post("/delhivery/create", auth, requirePermission("orders"), async (req, 
     const weightKg = totalWeightGrams > 0 ? (totalWeightGrams / 1000) : 0.5;
     const cleanPhone = String(order.customer.phone || "").replace(/\D/g, "").slice(-10);
 
+    const isCod = order.paymentMethod === 'COD';
+    const codDue = Number(order.codDueAmount || 0);
+    const totalEst = Number(order.totalEstimate || 0);
+    const codAmount = isCod
+      ? Math.max(1, codDue > 0 ? codDue : (totalEst > 0 ? Math.round(totalEst * 0.85) : 1))
+      : 0;
+    const finalTotalAmount = Math.max(1, totalEst > 0 ? totalEst : (codAmount || 1));
+
     // Create Delhivery shipment
     const shipmentData = {
       format: "json",
@@ -303,7 +311,7 @@ router.post("/delhivery/create", auth, requirePermission("orders"), async (req, 
             pin: addr.pincode,
             state: addr.state,
             order: order._id.toString(),
-            payment_mode: order.paymentMethod === 'COD' ? 'COD' : 'Prepaid',
+            payment_mode: isCod ? 'COD' : 'Pre-paid',
             shipping_mode: 'Surface',
             return_name: pickupAddress.name,
             return_address: pickupAddress.address,
@@ -313,7 +321,7 @@ router.post("/delhivery/create", auth, requirePermission("orders"), async (req, 
             return_phone: pickupAddress.phone,
             products_desc: orderItems.map(i => i.name).join(', '),
             order_date: new Date().toISOString().split('T')[0],
-            total_amount: order.totalEstimate,
+            total_amount: finalTotalAmount,
             seller_name: pickupAddress.name,
             seller_add: pickupAddress.address,
             seller_city: pickupAddress.city,
@@ -339,9 +347,38 @@ router.post("/delhivery/create", auth, requirePermission("orders"), async (req, 
       }
     };
 
-    const result = await delhivery.createShipment(shipmentData);
+    if (isCod) {
+      shipmentData.data.shipments[0].cod_amount = codAmount;
+      shipmentData.data.shipments[0].total_amount = finalTotalAmount;
+    }
+
+    let result = null;
+    let waybill = '';
+    try {
+      result = await delhivery.createShipment(shipmentData);
+      waybill = result?.waybill || result?.packages?.[0]?.waybill || result?.packages?.[0]?.wbn || result?.shipments?.[0]?.waybill || result?.upload_wbn || '';
+    } catch (createErr) {
+      console.warn("Admin Delhivery createShipment error:", createErr.message);
+      const errStr = String(createErr.message || "");
+      const wbnMatch = errStr.match(/\b\d{12,14}\b/);
+      if (wbnMatch) {
+        waybill = wbnMatch[0];
+      } else if (/already\s*exist|duplicate/i.test(errStr)) {
+        const existing = await delhivery.getShipmentByOrderId(order._id.toString()) || (order.orderNumber ? await delhivery.getShipmentByOrderId(order.orderNumber) : null);
+        if (existing?.waybill) {
+          waybill = existing.waybill;
+        }
+      }
+      if (!waybill) throw createErr;
+    }
+
+    if (!waybill) {
+      const existing = await delhivery.getShipmentByOrderId(order._id.toString()) || (order.orderNumber ? await delhivery.getShipmentByOrderId(order.orderNumber) : null);
+      if (existing?.waybill) {
+        waybill = existing.waybill;
+      }
+    }
     
-    const waybill = result?.packages?.[0]?.waybill || '';
     const trackingUrl = `https://www.delhivery.com/track/package/${waybill}`;
     const status = 'Manifested';
 

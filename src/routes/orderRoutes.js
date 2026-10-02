@@ -206,6 +206,14 @@ const tryCreateDelhiveryShipment = async (order) => {
       console.warn("Auto warehouse registration warning in tryCreateDelhiveryShipment:", whErr.message);
     }
 
+    const isCod = order.paymentMethod === "COD";
+    const codDue = Number(order.codDueAmount || 0);
+    const totalEst = Number(order.totalEstimate || 0);
+    const codAmount = isCod
+      ? Math.max(1, codDue > 0 ? codDue : (totalEst > 0 ? Math.round(totalEst * 0.85) : 1))
+      : 0;
+    const finalTotalAmount = Math.max(1, totalEst > 0 ? totalEst : (codAmount || 1));
+
     const shipmentData = {
       pickup_location: cleanLocationName,
       name: order.customer.name,
@@ -215,8 +223,8 @@ const tryCreateDelhiveryShipment = async (order) => {
       city: addr.city,
       state: addr.state,
       order_id: order._id.toString(),
-      payment_mode: order.paymentMethod === "COD" ? "COD" : "Prepaid",
-      total_amount: Number(order.totalEstimate || 0),
+      payment_mode: isCod ? "COD" : "Pre-paid",
+      total_amount: finalTotalAmount,
       product_desc: order.items.map(it => it.name).join(", "),
       weight: weightKg,
       seller_name: pickupName,
@@ -233,16 +241,42 @@ const tryCreateDelhiveryShipment = async (order) => {
       return_phone: pickupPhone
     };
 
-    if (order.paymentMethod === "COD") {
-      shipmentData.cod_amount = Number(order.codDueAmount || order.totalEstimate || 0);
+    if (isCod) {
+      shipmentData.cod_amount = codAmount;
     }
 
-    const result = await createShipment(shipmentData);
+    let result = null;
+    let waybill = '';
+    try {
+      result = await createShipment(shipmentData);
+      waybill = result?.waybill || result?.packages?.[0]?.waybill || result?.packages?.[0]?.wbn || result?.shipments?.[0]?.waybill || result?.upload_wbn || '';
+    } catch (createErr) {
+      console.warn("Auto Delhivery createShipment error:", createErr.message);
+      const errStr = String(createErr.message || "");
+      const wbnMatch = errStr.match(/\b\d{12,14}\b/);
+      if (wbnMatch) {
+        waybill = wbnMatch[0];
+      } else if (/already\s*exist|duplicate/i.test(errStr)) {
+        const { getShipmentByOrderId } = await import("../services/delhivery.service.js");
+        const existing = await getShipmentByOrderId(order._id.toString()) || (order.orderNumber ? await getShipmentByOrderId(order.orderNumber) : null);
+        if (existing?.waybill) {
+          waybill = existing.waybill;
+        }
+      }
+    }
 
-    if (result.waybill) {
-      const trackingUrl = `https://www.delhivery.com/track/package/${result.waybill}`;
-      order.shipping = { provider: "DELHIVERY", waybill: result.waybill, status: "Manifested", trackingUrl };
-      order.delhiveryWaybill = result.waybill;
+    if (!waybill) {
+      const { getShipmentByOrderId } = await import("../services/delhivery.service.js");
+      const existing = await getShipmentByOrderId(order._id.toString()) || (order.orderNumber ? await getShipmentByOrderId(order.orderNumber) : null);
+      if (existing?.waybill) {
+        waybill = existing.waybill;
+      }
+    }
+
+    if (waybill) {
+      const trackingUrl = `https://www.delhivery.com/track/package/${waybill}`;
+      order.shipping = { provider: "DELHIVERY", waybill, status: "Manifested", trackingUrl };
+      order.delhiveryWaybill = waybill;
       order.shipment_status = "Manifested";
       order.shippingAddress = addr;
       order.status = "SHIPPED";
@@ -260,7 +294,7 @@ const tryCreateDelhiveryShipment = async (order) => {
           type: "ORDER_STATUS",
           entityType: "ORDER",
           entityId: order._id.toString(),
-          note: `Delhivery shipment created. Waybill: ${result.waybill}. Order marked as SHIPPED.`
+          note: `Delhivery shipment created. Waybill: ${waybill}. Order marked as SHIPPED.`
         });
       } catch {}
 
@@ -269,7 +303,7 @@ const tryCreateDelhiveryShipment = async (order) => {
         orderNumber: order.orderNumber,
         status: "SHIPPED",
         delhiveryStatus: "Manifested",
-        waybill: result.waybill
+        waybill
       });
 
       return order;
@@ -1675,7 +1709,8 @@ router.patch("/:id/pack", auth, requirePermission("orders"), async (req, res) =>
 
     res.json(order);
   } catch (err) {
-    res.status(500).json({ error: "pack_failed" });
+    console.error("Admin pack failed:", err);
+    res.status(500).json({ error: "pack_failed", message: err.message });
   }
 });
 
