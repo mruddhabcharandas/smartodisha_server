@@ -1157,11 +1157,73 @@ router.post("/verify-payment", async (req, res) => {
   }
 });
 
+// Sync Pending Payment - handles when customer pays on Cashfree and navigates back
+router.post("/sync-pending", auth, requireRole("customer"), async (req, res) => {
+  const { cashfreeOrderId } = req.body || {};
+  if (!cashfreeOrderId) return res.status(400).json({ error: "missing_order_id" });
+
+  try {
+    const order = await Order.findOne({ cashfreeOrderId });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    if (order.paymentStatus === "PAID" && order.status === "CONFIRMED") {
+      return res.json({ paid: true, orderId: order._id, orderNumber: order.orderNumber });
+    }
+
+    // Query Cashfree API directly with server credentials
+    try {
+      const { data: cfOrder } = await cashfree.get(`/pg/orders/${cashfreeOrderId}`);
+      if (cfOrder && (cfOrder.order_status === "PAID" || cfOrder.order_status === "SUCCESS")) {
+        console.log(`[sync-pending] Order ${cashfreeOrderId} confirmed PAID by Cashfree API. Finalizing...`);
+        const finalized = await confirmAndFinalizeOrder(order);
+        return res.json({ paid: true, orderId: finalized._id, orderNumber: finalized.orderNumber });
+      }
+    } catch (cfErr) {
+      console.warn("[sync-pending] Cashfree API check note:", cfErr.response?.data?.message || cfErr.message);
+    }
+
+    return res.json({ paid: false, status: order.status });
+  } catch (e) {
+    console.error("[sync-pending] Error:", e);
+    return res.status(500).json({ error: "sync_failed" });
+  }
+});
+
 router.get("/my-orders", async (req, res) => {
   const { phone } = req.query;
   if (!phone) return res.status(400).json({ error: "missing_phone" });
+  const cleanPhone = String(phone).replace(/\D/g, "").slice(-10);
+
+  // Auto-reconcile recent PENDING_PAYMENT orders for this phone with Cashfree
+  try {
+    const pending = await Order.find({
+      $or: [
+        { "customer.phone": phone },
+        { "customer.phone": cleanPhone }
+      ],
+      status: "PENDING_PAYMENT",
+      cashfreeOrderId: { $exists: true, $ne: "" },
+      createdAt: { $gte: new Date(Date.now() - 48 * 60 * 60 * 1000) }
+    }).limit(5);
+
+    for (const po of pending) {
+      try {
+        const { data: cfOrder } = await cashfree.get(`/pg/orders/${po.cashfreeOrderId}`);
+        if (cfOrder && (cfOrder.order_status === "PAID" || cfOrder.order_status === "SUCCESS")) {
+          console.log(`[Auto-Reconcile] Detected PAID order on /my-orders for ${po.cashfreeOrderId}`);
+          await confirmAndFinalizeOrder(po);
+        }
+      } catch (_) {}
+    }
+  } catch (recErr) {
+    console.warn("[Auto-Reconcile] Error checking pending orders:", recErr.message);
+  }
+
   const items = await Order.find({ 
-    "customer.phone": phone, 
+    $or: [
+      { "customer.phone": phone },
+      { "customer.phone": cleanPhone }
+    ], 
     paymentStatus: { $ne: "FAILED" },
     status: { $nin: ["PENDING", "PENDING_PAYMENT"] }
   }).sort({ createdAt: -1 });
@@ -1195,6 +1257,28 @@ router.get("/my", auth, requireRole("customer"), async (req, res) => {
     ];
     if (email) {
       orClauses.push({ "customer.email": email });
+    }
+
+    // Auto-reconcile recent PENDING_PAYMENT orders for this customer with Cashfree
+    try {
+      const pending = await Order.find({
+        $or: orClauses,
+        status: "PENDING_PAYMENT",
+        cashfreeOrderId: { $exists: true, $ne: "" },
+        createdAt: { $gte: new Date(Date.now() - 48 * 60 * 60 * 1000) }
+      }).limit(5);
+
+      for (const po of pending) {
+        try {
+          const { data: cfOrder } = await cashfree.get(`/pg/orders/${po.cashfreeOrderId}`);
+          if (cfOrder && (cfOrder.order_status === "PAID" || cfOrder.order_status === "SUCCESS")) {
+            console.log(`[Auto-Reconcile] Detected PAID order on /my for ${po.cashfreeOrderId}`);
+            await confirmAndFinalizeOrder(po);
+          }
+        } catch (_) {}
+      }
+    } catch (recErr) {
+      console.warn("[Auto-Reconcile] Error checking pending orders in /my:", recErr.message);
     }
 
     const items = await Order.find({ 

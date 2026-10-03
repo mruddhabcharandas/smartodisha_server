@@ -58,7 +58,11 @@ app.use(cors({
   credentials: true,
   methods: ["GET", "POST", "PUT","PATCH", "DELETE", "OPTIONS"]
 }));
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf;
+  }
+}));
 app.use(morgan("dev"));
 
 // Serve static files (for local uploads fallback)
